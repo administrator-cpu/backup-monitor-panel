@@ -223,8 +223,15 @@ git pull
 Test-Path deploy\nginx-backup-panel.http-only.conf
 ```
 Then:
+Put **your real name** (the one you created in DNS in Step 1) between the quotes. Don't use
+the example `backups.yourdomain.com`: `yourdomain.com` is someone else's real website.
 ```
 $name = 'backups.yourdomain.com'
+Resolve-DnsName $name -Type A | Select-Object Name, IPAddress
+```
+The `IPAddress` must be **your server's public IP**. If you get an error or a different IP,
+stop: either the name in `$name` is wrong, or the DNS record isn't there yet. Then:
+```
 cd C:\nginx-1.30.2
 if (-not (Test-Path conf\nginx.conf.before-backup-panel)) { Copy-Item conf\nginx.conf conf\nginx.conf.before-backup-panel }
 (Get-Content C:\Apps\db-backup\panel\deploy\nginx-backup-panel.http-only.conf -Raw).Replace('backups.example.com', $name) | Set-Content conf\backup-panel.conf -Encoding ASCII
@@ -242,11 +249,6 @@ It must go at the **end**, after all your other sites. Nginx treats the first si
 for a port as the default for unknown names, so at the end the new name can never stand in
 for another site.
 
-*Prefer to paste the blocks straight into `nginx.conf` instead of using a separate file?*
-That works the same. Paste the contents of `conf\backup-panel.conf` (from the commands above,
-with your name already filled in) at the same place: just above the last `}`. In Step 5,
-replace that pasted part with the full version. The separate file is suggested only because
-`nginx.conf` then changes by one line, which is easier to check and to undo.
 Save, then test and reload:
 ```
 .\nginx.exe -t
@@ -257,15 +259,24 @@ Only then:
 .\nginx.exe -s reload
 ```
 
+*Prefer to paste the blocks straight into `nginx.conf` instead of using a separate file?*
+That works the same. Paste the contents of `conf\backup-panel.conf` (from the commands above,
+with your name already filled in) at the same place: just above the last `}`. In Step 5,
+replace that pasted part with the full version. The separate file is suggested only because
+`nginx.conf` then changes by one line, which is easier to check and to undo.
+
 ### Step 3: Check that Let's Encrypt will reach the name (server, then PC)
 
 ```
 New-Item -ItemType Directory -Force html\acme\.well-known\acme-challenge | Out-Null
 Set-Content html\acme\.well-known\acme-challenge\panel-test.txt 'panel test ok' -Encoding ASCII
+"Open this on your PC:  http://$name/.well-known/acme-challenge/panel-test.txt"
 ```
-On your **PC**, open `http://backups.yourdomain.com/.well-known/acme-challenge/panel-test.txt`
-in a browser. It must show `panel test ok`. If it doesn't, don't go on: Let's Encrypt
-blocks a name for an hour after five failed tries. Then remove the test file:
+The last line prints the exact address with your name in it. Open **that** address in a
+browser on your PC. It must show `panel test ok`. If it doesn't, don't go on: Let's Encrypt
+blocks a name for an hour after five failed tries. (A page from a firewall such as Sucuri or
+Cloudflare means the address isn't reaching your server; check the name and its DNS record.)
+Then remove the test file:
 ```
 Remove-Item html\acme\.well-known\acme-challenge\panel-test.txt
 ```
@@ -297,10 +308,13 @@ Again `syntax is ok` and `test is successful`, then:
 
 ### Step 6: Try it (PC or phone)
 
-- `https://backups.yourdomain.com` shows the sign-in page with a valid padlock.
-- `http://backups.yourdomain.com` goes to the https address by itself.
-- `https://backups.yourdomain.com/api/agent/report` shows a 404 page. That's intended: the
-  agent's address is never public.
+On the server, print the addresses with your name in them:
+```
+"https://$name"; "http://$name"; "https://$name/api/agent/report"
+```
+- The first shows the sign-in page with a valid padlock.
+- The second goes to the https address by itself.
+- The third shows a 404 page. That's intended: the agent's address is never public.
 
 Port 443 is already open for your other sites. Port 7480 is not opened anywhere, because
 the app only listens on 127.0.0.1. The Nginx file also limits sign-in attempts and keeps its
