@@ -1,0 +1,18 @@
+{
+  "name": "backup-monitor-panel",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Backup control panel for the server: a dependency-free Node app on 127.0.0.1 behind Nginx, fed by an outbound-only PowerShell agent.",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "setup-login": "node src/setup-login.js",
+    "dev": "node src/server.js --config dev/panel.config.dev.json",
+    "dev:setup-login": "node src/setup-login.js --config dev/panel.config.dev.json",
+    "test": "node --test test/*.test.js",
+    "test:agent": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File agent/tests/run-agent-tests.ps1"
+  }
+}
