@@ -1,0 +1,7 @@
+{
+  "port": 8787,
+  "commandsEnabled": true,
+  "dataFile": "../.dev-data/state.json",
+  "loginFile": "../.dev-data/login.json",
+  "agentTokenHashFile": "../.dev-data/agent-token.sha256"
+}

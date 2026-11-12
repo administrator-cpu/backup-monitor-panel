@@ -1,0 +1,9 @@
+{
+  "port": 7480,
+  "commandsEnabled": false,
+  "timeZone": "Asia/Kolkata",
+  "staleAfterMinutes": 10,
+  "dataFile": "C:/Apps/db-backup/panel-data/state.json",
+  "loginFile": "C:/Apps/db-backup/secrets/panel-login.json",
+  "agentTokenHashFile": "C:/Apps/db-backup/secrets/panel-agent-token.sha256"
+}

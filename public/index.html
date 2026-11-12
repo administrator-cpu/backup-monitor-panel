@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Backups</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preload" href="/fonts/ibm-plex-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/app.css" />
+    <script type="module" src="/js/main.js"></script>
+  </head>
+  <body>
+    <header class="masthead">
+      <div class="masthead-inner">
+        <p class="ident">
+          <svg class="ident-mark" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+            <rect x="2" y="3" width="16" height="4" rx="1" />
+            <rect x="2" y="8.5" width="16" height="4" rx="1" />
+            <rect x="2" y="14" width="10" height="3" rx="1" />
+          </svg>
+          <span class="ident-name">Backups</span>
+          <span id="host" class="ident-host" hidden></span>
+        </p>
+        <div class="masthead-meta">
+          <span id="freshness" class="freshness" data-state="loading"><span class="beacon" aria-hidden="true"></span><span id="freshness-text">Connecting…</span></span>
+          <span id="mode" class="mode" hidden></span>
+          <button id="refresh" type="button" class="btn btn-quiet btn-sm">Refresh</button>
+          <button id="signout" type="button" class="btn btn-quiet btn-sm">Sign out</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="app" class="page"></main>
+
+    <footer class="page footnote">
+      <p>Status comes from the agent, a scheduled task on this server. Run-now can start the three backups and three checks, nothing else.</p>
+    </footer>
+
+    <dialog id="confirm" class="confirm" aria-labelledby="confirm-title" aria-describedby="confirm-what">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-what"></p>
+      <dl class="pairs">
+        <dt>Next scheduled run</dt>
+        <dd id="confirm-next"></dd>
+        <dt>Last run</dt>
+        <dd id="confirm-last"></dd>
+      </dl>
+      <p id="confirm-extra" class="note note-warn"></p>
+      <p class="quiet">The agent collects the request within about a minute. If it has not done so within 15 minutes, the request expires and never runs.</p>
+      <div class="confirm-actions">
+        <button type="button" class="btn btn-quiet" data-close="cancel">Cancel</button>
+        <button type="button" class="btn" id="confirm-ok">Start</button>
+      </div>
+    </dialog>
+
+    <div id="notices" class="notices" role="status" aria-live="polite"></div>
+  </body>
+</html>

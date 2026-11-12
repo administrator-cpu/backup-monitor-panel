@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Sign in · Backups</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css" />
+    <script type="module" src="/js/login.js"></script>
+  </head>
+  <body>
+    <main class="signin" aria-labelledby="signin-title">
+      <p class="ident">
+        <svg class="ident-mark" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+          <rect x="2" y="3" width="16" height="4" rx="1" />
+          <rect x="2" y="8.5" width="16" height="4" rx="1" />
+          <rect x="2" y="14" width="10" height="3" rx="1" />
+        </svg>
+        <span class="ident-name">Backups</span>
+      </p>
+      <h1 id="signin-title">Sign in</h1>
+      <p class="quiet">Your panel password and the 6-digit code from your authenticator app.</p>
+      <form id="signin" novalidate>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+        <label for="code">Authenticator code</label>
+        <input id="code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required aria-describedby="code-hint" />
+        <p id="code-hint" class="field-hint">The code changes every 30 seconds.</p>
+        <p id="signin-error" class="signin-error" role="alert" hidden></p>
+        <button class="btn" type="submit" id="signin-submit">Sign in</button>
+      </form>
+      <p class="signin-note">After 5 wrong tries, sign-in pauses for 15 minutes. On the server, <code>pm2 restart backup-panel</code> lifts the pause.</p>
+    </main>
+  </body>
+</html>
