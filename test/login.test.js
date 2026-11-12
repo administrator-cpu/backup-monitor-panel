@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { base32Decode, base32Encode, hashPassword, matchTotp, totpAt, verifyPassword } from '../src/auth.js';
+import { base32Decode, base32Encode, findTotpOffset, hashPassword, matchTotp, totpAt, verifyPassword } from '../src/auth.js';
 import { call, Clock, code, makePanel, pageHeaders, PASSWORD, signIn, TOTP_SECRET } from './helpers.js';
 
 const login = (panel, clock, body, extra = {}) => call(panel, clock, 'POST', '/api/login', { headers: pageHeaders, body, cookie: null, ...extra });
@@ -15,6 +15,17 @@ test('TOTP matches the RFC 6238 test vectors', () => {
   assert.equal(matchTotp(TOTP_SECRET, '287082', 59000 + 30000), 1, 'one step of clock drift is allowed');
   assert.equal(matchTotp(TOTP_SECRET, '287082', 59000 + 90000), null, 'older codes are not');
   assert.equal(matchTotp(TOTP_SECRET, '28708', 59000), null);
+});
+
+test('setup can tell a wrong key from clocks that are apart', () => {
+  const now = Date.parse('2026-11-12T06:00:00Z');
+  const step = Math.floor(now / 30000);
+  assert.equal(findTotpOffset(TOTP_SECRET, totpAt(TOTP_SECRET, step), now), 0);
+  assert.equal(findTotpOffset(TOTP_SECRET, totpAt(TOTP_SECRET, step + 4), now), 120, 'phone 2 minutes ahead');
+  assert.equal(findTotpOffset(TOTP_SECRET, totpAt(TOTP_SECRET, step - 660), now), -19800, 'server 5 h 30 min ahead (time-zone mix-up)');
+  const otherKey = Buffer.from('a completely different key!!');
+  assert.equal(findTotpOffset(TOTP_SECRET, totpAt(otherKey, step), now, 0), null, 'a code from another key is not matched at the same moment');
+  assert.equal(findTotpOffset(TOTP_SECRET, 'abc', now), null);
 });
 
 test('passwords are stored as scrypt hashes', () => {
