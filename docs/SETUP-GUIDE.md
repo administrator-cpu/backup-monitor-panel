@@ -93,14 +93,25 @@ npm run setup-login
 
 1. Type a password of at least 12 characters, twice. A few random words work well.
    Nothing is shown while you type.
-2. It prints a **Key** in groups of four letters. On your phone, open Google Authenticator
-   or Microsoft Authenticator and choose **Add account > Enter a setup key**. Name it
-   `Backups panel`, type the key, and leave it as **Time based**.
-3. Type the 6-digit code the app shows. You should see
-   `Saved. Restart the panel so old sessions end`.
+2. It prints a **Key**. Add it to an authenticator app on your phone. **No account or
+   sign-in is needed**: the key is the whole secret, and nothing is sent anywhere.
+   - **Google Authenticator:** **+ > Enter a setup key**.
+   - **Microsoft Authenticator:** **+ > Other account (Google, Facebook, etc.) > Enter code
+     manually**. Don't pick "Personal" or "Work or school"; those are for Microsoft accounts.
 
-If the code is refused, check the key was typed exactly and that the server clock is
-correct (Windows time sync).
+   Name it `Backups panel`, type the key (spaces don't matter), and keep **Time based**.
+   Each run of `setup-login` makes a **new** key, so first delete any older
+   "Backups panel" entry in the app.
+3. Type the 6-digit code the app shows. You should see
+   `Saved. Restart the panel so old sessions end`, and the command finishes.
+
+If a code is refused, the script says why and lets you try the next code with the same key:
+- **"does not come from the key shown above"**: the app has a different key. This is usually
+  an entry from an earlier run, or "Personal" / "Work or school" chosen in Microsoft
+  Authenticator. Delete the entry and add the key again.
+- **"the clocks differ by about ..."**: the key is right but a clock is off. If it says
+  5 h 30 min, one clock shows India time while its time zone says UTC. Check `Get-TimeZone` and
+  the clock on the server, and set the phone to automatic date, time and time zone.
 
 Later, to change only the password: `npm run setup-login -- --password`.
 

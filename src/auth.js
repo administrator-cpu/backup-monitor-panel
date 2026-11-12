@@ -98,6 +98,20 @@ export function matchTotp(secret, code, nowMs) {
 
 export const newTotpSecret = () => randomBytes(20);
 
+// For setup only: if the code belongs to this key at all within +-12 hours,
+// return how many seconds the phone is ahead of this machine (negative:
+// behind). null means the code did not come from this key.
+export function findTotpOffset(secret, code, nowMs, maxHours = 12) {
+  if (!/^\d{6}$/.test(String(code))) return null;
+  const step = Math.floor(nowMs / 30000);
+  for (let d = 0; d <= maxHours * 120; d++) {
+    for (const s of d === 0 ? [step] : [step + d, step - d]) {
+      if (totpAt(secret, s) === code) return (s - step) * 30;
+    }
+  }
+  return null;
+}
+
 // ------------------------------------------------------------------ login, sessions, lockout
 
 export function createAuth({ loginFile, log = console.log }) {
