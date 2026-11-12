@@ -123,8 +123,10 @@ pm2 start src\server.js --name backup-panel
 pm2 save
 ```
 
-- `pm2 logs backup-panel --lines 5` should show
+- `pm2 logs backup-panel --lines 5` should show two lines:
+  `Starting backup panel (Node v…, config …)` and then
   `Backup panel listening on http://127.0.0.1:7480 (Run-now off, login set up)`.
+  If it shows `Could not start: …` instead (in the error log), that line says what to fix.
 - `pm2 save` keeps it in the list PM2 brings back after a reboot, the same way as
   your other apps.
 
@@ -308,6 +310,7 @@ exact report.
 | `-Discover`: "present but cannot be opened by ..." | The secret file was made by a different Windows user. Run the setup command again as the user the task runs as. |
 | A card says "Task missing" | The scheduled task's name differs from the list in `$AllowedActions` at the top of `panel-agent.ps1`. Compare with `.\panel-agent.ps1 -Discover` and Task Scheduler. |
 | `pm2 logs`: "panel.config.json not found" | Part 2, step 2: copy `panel.config.example.json` to `panel.config.json`. |
+| `pm2 logs backup-panel` shows nothing at all, and `http://127.0.0.1:7480` does not open | The code is older than the PM2 fix. Run `git pull`, then `pm2 restart backup-panel`. |
 
 Logs: the panel's are in `pm2 logs backup-panel` (start-up, sign-ins, failed sign-ins,
 Run-now requests). The agent's are in `C:\Apps\db-backup\logs\panel-agent.log` (errors,

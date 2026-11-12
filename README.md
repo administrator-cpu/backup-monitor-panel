@@ -16,7 +16,8 @@ anything.
 | `agent/panel-agent-setup.ps1` | One-time setup on the server: agent token (DPAPI) and fingerprint, read-only Backblaze key, scheduled task, status, kill switch. |
 | `agent/panel-agent.config.psd1` | Agent settings (data only). Ships read-only (`CommandsEnabled = $false`). |
 | `agent/tests/run-agent-tests.ps1` | Agent tests. Fake Task Scheduler hooks; never touches real tasks. |
-| `src/server.js` | Entry point: HTTP server on 127.0.0.1, hourly housekeeping. |
+| `src/server.js` | Entry point (`npm start`, PM2): reads the config and starts the panel. |
+| `src/panel.js` | The HTTP server on 127.0.0.1 and hourly housekeeping. |
 | `src/app.js` | Routes: agent API (loopback only, Bearer token), sign-in, page API. |
 | `src/auth.js` | scrypt passwords, TOTP (RFC 6238), sessions, lockouts, agent token check. |
 | `src/store.js` | All data in one JSON file, written atomically. |

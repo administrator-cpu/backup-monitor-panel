@@ -8,7 +8,7 @@ import { createServer, request as httpRequest } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { sha256Hex } from '../src/auth.js';
 import { loadConfig } from '../src/config.js';
-import { startPanel } from '../src/server.js';
+import { startPanel } from '../src/panel.js';
 import { openStore } from '../src/store.js';
 import { AGENT_TOKEN, sampleReport } from './helpers.js';
 
