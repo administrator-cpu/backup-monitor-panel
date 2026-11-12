@@ -187,34 +187,112 @@ from the agent."** That's correct for now.
 
 ## Part 6: Publish it with HTTPS through Nginx
 
-1. **DNS (at your domain provider):** create an **A record** for the name you want, for
-   example `backups.yourdomain.com`, pointing at the server's public IP. Wait until
-   `nslookup backups.yourdomain.com` on your PC shows that IP.
-2. **Certificate (server, win-acme):** create a certificate for that name the same way
-   your other sites' certificates were made, and store the PEM files in the same place
-   (`C:\nginx-1.30.2\ssl`).
-3. **Nginx (server):** copy `deploy\nginx-backup-panel.conf` from this project to
-   `C:\nginx-1.30.2\conf\backup-panel.conf`. In it, replace every
-   `backups.example.com` with your name, and point the two `ssl_certificate` lines at the
-   new files. Then add this line inside the `http { }` block of `nginx.conf`:
-   ```
-   include C:/nginx-1.30.2/conf/backup-panel.conf;
-   ```
-4. Check and reload Nginx, from its folder:
-   ```
-   cd C:\nginx-1.30.2
-   .\nginx.exe -t
-   .\nginx.exe -s reload
-   ```
-   `-t` must say `syntax is ok` and `test is successful` before you reload. If it doesn't,
-   nothing changes and your other sites keep running. Fix the file first.
-5. **On your PC or phone**, open `https://backups.yourdomain.com`. You should get the
-   sign-in page with a valid padlock.
+This uses the same method as your other sites: win-acme with http validation through
+`C:\nginx-1.30.2\html\acme`, and PEM files in `C:\nginx-1.30.2\ssl`.
 
-Port 443 is already open for your other sites. Port 7480 is not opened anywhere,
-because the app only listens on 127.0.0.1. The Nginx file also refuses the agent's
-address (`/api/agent/`) from outside, limits sign-in attempts, and keeps its own log
-(`logs\backup-panel.access.log`) so it doesn't add to the big `access.log`.
+**Why the order matters:** Let's Encrypt only issues the certificate after it can fetch a
+check file from the new name on port 80. Nginx refuses to load an HTTPS block whose
+certificate files don't exist yet. So first add a port-80-only block, then get the
+certificate, then switch to the full file. Before each reload, `nginx -t` checks the new
+config; if it fails, nothing changes and your other sites keep running.
+
+Do all of Part 6 in **one PowerShell window**. Step 2 sets `$name`, and the later steps use
+it. If you open a new window, run the `$name = ...` line again.
+
+### Step 1: DNS (at your domain provider)
+
+Create an **A record**: name `backups` (or what you choose), value = the server's public IP
+(the same one your other sites use). If the domain's DNS is on Cloudflare, set it to
+**DNS only** (grey cloud). From your PC, wait until this shows that IP:
+```
+nslookup backups.yourdomain.com 8.8.8.8
+```
+
+### Step 2: Port 80 only (server)
+
+```
+$name = 'backups.yourdomain.com'
+cd C:\nginx-1.30.2
+Copy-Item conf\nginx.conf conf\nginx.conf.before-backup-panel
+(Get-Content C:\Apps\db-backup\panel\deploy\nginx-backup-panel.http-only.conf -Raw).Replace('backups.example.com', $name) | Set-Content conf\backup-panel.conf -Encoding ASCII
+Get-Content conf\backup-panel.conf
+```
+The last command shows the file with your name in it. The copy of `nginx.conf` is your
+way back (see the end of this part).
+
+Open `C:\nginx-1.30.2\conf\nginx.conf` in Notepad. Go to the **very last line**, which is a
+single `}` that closes the `http { }` block. On a new line just **above** it, add:
+```
+    include C:/nginx-1.30.2/conf/backup-panel.conf;
+```
+Save, then test and reload:
+```
+.\nginx.exe -t
+```
+You should see `syntax is ok` and `test is successful` (in red on Windows; that's normal).
+Only then:
+```
+.\nginx.exe -s reload
+```
+
+### Step 3: Check that Let's Encrypt will reach the name (server, then PC)
+
+```
+New-Item -ItemType Directory -Force html\acme\.well-known\acme-challenge | Out-Null
+Set-Content html\acme\.well-known\acme-challenge\panel-test.txt 'panel test ok' -Encoding ASCII
+```
+On your **PC**, open `http://backups.yourdomain.com/.well-known/acme-challenge/panel-test.txt`
+in a browser. It must show `panel test ok`. If it doesn't, don't go on: Let's Encrypt
+blocks a name for an hour after five failed tries. Then remove the test file:
+```
+Remove-Item html\acme\.well-known\acme-challenge\panel-test.txt
+```
+
+### Step 4: Create the certificate (server)
+
+One command, with every answer given, so there are no menus:
+```
+C:\win-acme\wacs.exe --source manual --host $name --validation filesystem --webroot C:\nginx-1.30.2\html\acme --store pemfiles --pemfilespath C:\nginx-1.30.2\ssl --installation none --accepttos
+```
+It should end with `Authorization result: valid`, a line about exporting `.pem` files to
+`C:\nginx-1.30.2\ssl`, and `Adding renewal for ...`. The existing "win-acme renew" task
+renews it like the others. Check the files:
+```
+Get-ChildItem C:\nginx-1.30.2\ssl\$name*
+```
+You should see four files: `-chain.pem`, `-chain-only.pem`, `-crt.pem`, `-key.pem`.
+
+### Step 5: Switch to the full file (server)
+
+```
+(Get-Content C:\Apps\db-backup\panel\deploy\nginx-backup-panel.conf -Raw).Replace('backups.example.com', $name) | Set-Content conf\backup-panel.conf -Encoding ASCII
+.\nginx.exe -t
+```
+Again `syntax is ok` and `test is successful`, then:
+```
+.\nginx.exe -s reload
+```
+
+### Step 6: Try it (PC or phone)
+
+- `https://backups.yourdomain.com` shows the sign-in page with a valid padlock.
+- `http://backups.yourdomain.com` goes to the https address by itself.
+- `https://backups.yourdomain.com/api/agent/report` shows a 404 page. That's intended: the
+  agent's address is never public.
+
+Port 443 is already open for your other sites. Port 7480 is not opened anywhere, because
+the app only listens on 127.0.0.1. The Nginx file also limits sign-in attempts and keeps its
+own log (`logs\backup-panel.access.log`), so it doesn't add to the big `access.log`.
+
+**To undo Part 6 at any point:**
+```
+cd C:\nginx-1.30.2
+Copy-Item conf\nginx.conf.before-backup-panel conf\nginx.conf -Force
+.\nginx.exe -t
+.\nginx.exe -s reload
+```
+This puts `nginx.conf` back exactly as it was. `conf\backup-panel.conf` is then no longer
+used, and can stay or go.
 
 ## Part 7 (optional): Backblaze size and cost
 
