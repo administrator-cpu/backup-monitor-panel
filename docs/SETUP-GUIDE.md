@@ -210,10 +210,23 @@ nslookup backups.yourdomain.com 8.8.8.8
 
 ### Step 2: Port 80 only (server)
 
+This step changes nothing for your other sites:
+- it keeps a copy of today's `nginx.conf` (only the first time, so running it again never
+  overwrites the good copy);
+- it writes a **new, separate file** `conf\backup-panel.conf` with only the new name in it;
+- you then add **one line** to `nginx.conf` that loads that file.
+
+First make sure the server has the latest files. The next command must print `True`:
+```
+cd C:\Apps\db-backup\panel
+git pull
+Test-Path deploy\nginx-backup-panel.http-only.conf
+```
+Then:
 ```
 $name = 'backups.yourdomain.com'
 cd C:\nginx-1.30.2
-Copy-Item conf\nginx.conf conf\nginx.conf.before-backup-panel
+if (-not (Test-Path conf\nginx.conf.before-backup-panel)) { Copy-Item conf\nginx.conf conf\nginx.conf.before-backup-panel }
 (Get-Content C:\Apps\db-backup\panel\deploy\nginx-backup-panel.http-only.conf -Raw).Replace('backups.example.com', $name) | Set-Content conf\backup-panel.conf -Encoding ASCII
 Get-Content conf\backup-panel.conf
 ```
@@ -225,6 +238,15 @@ single `}` that closes the `http { }` block. On a new line just **above** it, ad
 ```
     include C:/nginx-1.30.2/conf/backup-panel.conf;
 ```
+It must go at the **end**, after all your other sites. Nginx treats the first site listed
+for a port as the default for unknown names, so at the end the new name can never stand in
+for another site.
+
+*Prefer to paste the blocks straight into `nginx.conf` instead of using a separate file?*
+That works the same. Paste the contents of `conf\backup-panel.conf` (from the commands above,
+with your name already filled in) at the same place: just above the last `}`. In Step 5,
+replace that pasted part with the full version. The separate file is suggested only because
+`nginx.conf` then changes by one line, which is easier to check and to undo.
 Save, then test and reload:
 ```
 .\nginx.exe -t
