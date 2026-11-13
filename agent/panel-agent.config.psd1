@@ -30,6 +30,14 @@
         # files = @{ StatusPatterns = @('files-*'); LogFile = 'files-backup.log'; MaxAgeHours = 26 }
     }
 
+    # Outside "I'm alive" check, so you get an e-mail when the server goes quiet
+    # (setup guide, part 10). It is used once the ping address has been saved with
+    #   .\panel-agent-setup.ps1 -SetHeartbeatUrl
+    Heartbeat = @{
+        Enabled      = $true
+        EveryMinutes = 5
+    }
+
     # Backblaze bucket size and cost. Needs a separate READ-ONLY key:
     #   .\panel-agent-setup.ps1 -SetBackblazeKey   then set Enabled = $true
     Backblaze = @{

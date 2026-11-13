@@ -68,6 +68,17 @@ function checkSameOrigin(request, url) {
   return null;
 }
 
+// The first of the six backup and check tasks that the last report shows running.
+function runningTaskName(data) {
+  for (const job of Array.isArray(data.jobs) ? data.jobs : []) {
+    for (const kind of ['backup', 'check']) {
+      const t = job && job[kind] && job[kind].task;
+      if (t && t.state === 'Running') return String(t.name || `${job.label || job.id} ${kind}`).slice(0, 100);
+    }
+  }
+  return null;
+}
+
 const isLoopback = (addr) => addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 
 export function createApp({ config, store, auth, agentCheck, assets, log = console.log }) {
@@ -127,7 +138,7 @@ export function createApp({ config, store, auth, agentCheck, assets, log = conso
     });
   }
 
-  async function createCommand(request, now) {
+  async function createCommand(request, now, peer) {
     const { value, error } = await readJson(request, 4096);
     if (error) return error;
     const action = findAction(value && value.action);
@@ -144,17 +155,20 @@ export function createApp({ config, store, auth, agentCheck, assets, log = conso
     const job = (Array.isArray(data.jobs) ? data.jobs : []).find((j) => j && j.id === action.job);
     const task = job && job[action.kind] && job[action.kind].task;
     if (task && task.state === 'Running') return fail(409, `"${action.task}" is already running.`);
+    // One at a time: nothing is queued while any backup or check is running.
+    const busy = runningTaskName(data);
+    if (busy) return fail(409, `"${busy}" is running. Start this after it has finished.`);
     store.expireCommands(now);
     if (store.activeForAction(action.id)) return fail(409, 'That command is already waiting for the agent.');
     if (store.countSince(iso(now - 3600000)) >= MAX_COMMANDS_PER_HOUR) return fail(429, `At most ${MAX_COMMANDS_PER_HOUR} commands per hour.`);
-    const cmd = { id: randomUUID(), action: action.id, status: 'pending', requested_at: iso(now), requested_by: VIEWER };
+    const cmd = { id: randomUUID(), action: action.id, status: 'pending', requested_at: iso(now), requested_by: VIEWER, requested_ip: str(peer.ip, 64) };
     try {
       store.insertCommand(cmd);
     } catch (e) {
       if (/UNIQUE/.test(String(e && e.message))) return fail(409, 'That command is already waiting for the agent.');
       throw e;
     }
-    log(`Run-now queued: ${action.task}`);
+    log(`Run-now queued: ${action.task} (from ${cmd.requested_ip})`);
     return json({ ok: true, command: cmd }, 201);
   }
 
@@ -214,10 +228,10 @@ export function createApp({ config, store, auth, agentCheck, assets, log = conso
       if (request.method === 'POST') {
         const refused = checkSameOrigin(request, url);
         if (refused) return refused;
-        if (path === '/api/commands') return createCommand(request, now);
+        if (path === '/api/commands') return createCommand(request, now, peer);
         const m = /^\/api\/commands\/([^/]+)\/cancel$/.exec(path);
         if (m && UUID_RE.test(m[1])) {
-          if (!store.cancelCommand(m[1], VIEWER, iso(now))) return fail(409, 'Only a command that is still waiting can be cancelled.');
+          if (!store.cancelCommand(m[1], `${VIEWER} from ${str(peer.ip, 64)}`, iso(now))) return fail(409, 'Only a command that is still waiting can be cancelled.');
           return json({ ok: true });
         }
       }

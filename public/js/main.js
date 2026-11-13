@@ -2,7 +2,7 @@
 
 import { cancelCommand, getStatus, queueCommand, signOut, SignedOut } from './api.js';
 import { h } from './dom.js';
-import { ago, makeFormatter } from './format.js';
+import { ago, makeFormatter, viewerTimeZone, zoneLabel, zoneOffsetMinutes } from './format.js';
 import { commandsMode, isStale } from './health.js';
 import * as view from './views.js';
 
@@ -23,10 +23,27 @@ const el = {
   notices: document.getElementById('notices'),
 };
 
+const SERVER_ZONE_FALLBACK = 'Asia/Kolkata';
+const VIEWER_ZONE = viewerTimeZone();
+
+// Remembered per browser: show times in server time (default) or the viewer's own.
+function readZoneChoice() {
+  try {
+    return localStorage.getItem('backup-panel-zone') === 'mine' ? 'mine' : 'server';
+  } catch {
+    return 'server';
+  }
+}
+
 const ui = {
   state: null,
   skew: 0,
-  fmt: makeFormatter('Asia/Kolkata'),
+  zoneChoice: readZoneChoice(),
+  fmt: makeFormatter(SERVER_ZONE_FALLBACK),
+  points: 'pg',
+  pointsFrom: '',
+  pointsTo: '',
+  pointsAll: false,
   tab: 'logs',
   busy: null,
   error: null,
@@ -43,14 +60,58 @@ const now = () => Date.now() + ui.skew;
 
 // ------------------------------------------------------------------ render
 
+const serverZone = () => ui.state?.timeZone || SERVER_ZONE_FALLBACK;
+const shownZone = () => (ui.zoneChoice === 'mine' && VIEWER_ZONE ? VIEWER_ZONE : serverZone());
+
+function zoneInfo(t) {
+  const server = serverZone();
+  let differs = false;
+  try {
+    differs = !!VIEWER_ZONE && zoneOffsetMinutes(VIEWER_ZONE, t) !== zoneOffsetMinutes(server, t);
+  } catch {
+    differs = false;
+  }
+  const mine = differs && ui.zoneChoice === 'mine';
+  return {
+    differs,
+    mine,
+    serverLabel: zoneLabel(server, t),
+    viewerLabel: differs ? zoneLabel(VIEWER_ZONE, t) : '',
+    onToggle: () => {
+      ui.zoneChoice = mine ? 'server' : 'mine';
+      try {
+        localStorage.setItem('backup-panel-zone', ui.zoneChoice);
+      } catch {
+        // Private windows may refuse storage; the choice then lasts for this page only.
+      }
+      ui.fmt = makeFormatter(shownZone());
+      render();
+    },
+  };
+}
+
 function context() {
+  const t = now();
   return {
     state: ui.state,
-    now: now(),
+    now: t,
     fmt: ui.fmt,
+    zone: zoneInfo(t),
     open: new Set([...app.querySelectorAll('details[open][data-key]')].map((d) => d.dataset.key)),
     busy: ui.busy,
     tab: ui.tab,
+    points: { set: ui.points, from: ui.pointsFrom, to: ui.pointsTo, all: ui.pointsAll },
+    onPoints: (change, focus) => {
+      if ('set' in change) {
+        ui.points = change.set;
+        ui.pointsAll = false;
+      }
+      if ('from' in change) ui.pointsFrom = change.from;
+      if ('to' in change) ui.pointsTo = change.to;
+      if ('all' in change) ui.pointsAll = change.all;
+      render();
+      if (focus) app.querySelector(`[data-focus="${CSS.escape(focus)}"]`)?.focus();
+    },
     onRun: runAction,
     onCancel: cancel,
     onTab: (tab, focus) => {
@@ -80,7 +141,7 @@ function render() {
   if (ui.error) parts.push(view.refreshError(ui.error, ui.state.report?.receivedAt, Math.round(ui.retryMs / 1000), () => load(), ctx));
   parts.push(view.summary(ctx));
   if (ui.state.report?.data) {
-    parts.push(view.backups(ctx), view.storage(ctx), view.history(ctx), view.agent(ctx), view.signIns(ctx), view.raw(ctx));
+    parts.push(view.backups(ctx), view.restorePoints(ctx), view.storage(ctx), view.history(ctx), view.agent(ctx), view.signIns(ctx), view.raw(ctx));
   } else {
     parts.push(view.history(ctx), view.signIns(ctx));
   }
@@ -152,7 +213,7 @@ async function load() {
   try {
     const state = await getStatus();
     ui.skew = Date.parse(state.now) - Date.now();
-    ui.fmt = makeFormatter(state.timeZone || 'Asia/Kolkata');
+    ui.fmt = makeFormatter(ui.zoneChoice === 'mine' && VIEWER_ZONE ? VIEWER_ZONE : state.timeZone || SERVER_ZONE_FALLBACK);
     noticeTransitions(state);
     const sig = signatureOf(state);
     changed = sig !== ui.signature || ui.error !== null;

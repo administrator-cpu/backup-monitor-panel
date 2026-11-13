@@ -4,3 +4,7 @@ node_modules/
 
 # Your server settings (copied from panel.config.example.json); never committed
 panel.config.json
+
+# Environment files (not used by the panel, but never committed)
+.env
+.env.*

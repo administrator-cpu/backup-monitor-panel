@@ -46,15 +46,19 @@ $MaxCommandAgeSeconds = 900
 # The three backup jobs shown on the panel. StatusPatterns, LogFile and
 # MaxAgeHours can be changed per job in the config file (Jobs = @{ ... }).
 $JobDefs = @(
-    @{ Id = 'pg';    Label = 'Postgres';       BackupAction = 'run-pg-backup';    CheckAction = 'run-pg-check';    StatusPatterns = @('pg-*', 'postgres*'); LogFile = 'pg-backup.log';    MaxAgeHours = 26 },
+    @{ Id = 'pg';    Label = 'Postgres';       BackupAction = 'run-pg-backup';    CheckAction = 'run-pg-check';    StatusPatterns = @('pg-*', 'postgres*', 'last-success.json'); LogFile = 'pg-backup.log';    MaxAgeHours = 26 },
     @{ Id = 'mongo'; Label = 'MongoDB';        BackupAction = 'run-mongo-backup'; CheckAction = 'run-mongo-check'; StatusPatterns = @('mongo*');            LogFile = 'mongo-backup.log'; MaxAgeHours = 26 },
     @{ Id = 'files'; Label = 'Files and logs'; BackupAction = 'run-files-backup'; CheckAction = 'run-files-check'; StatusPatterns = @('files-*', 'restic*'); LogFile = 'files-backup.log'; MaxAgeHours = 26 }
 )
 
-# Hooks so the tests can replace the real scheduled-task calls.
+# Other logs shown on the panel (not tied to one backup card).
+$ExtraLogs = @('nginx-reload.log')
+
+# Hooks so the tests can replace the real scheduled-task calls and the heartbeat.
 $GetTaskHook     = { param([string]$Name) @(Get-ScheduledTask -TaskName $Name -ErrorAction Stop) }
 $GetTaskInfoHook = { param($Task) $Task | Get-ScheduledTaskInfo -ErrorAction Stop }
 $StartTaskHook   = { param($Task) $Task | Start-ScheduledTask -ErrorAction Stop }
+$PingHook        = { param([string]$Url) Invoke-HeartbeatRequest $Url }
 
 $Cfg = $null
 $StateDir = $null
@@ -254,6 +258,7 @@ function Get-AgentConfig([string]$Path) {
         TimeoutSec      = 30
         Jobs            = @{}
         Backblaze       = @{}
+        Heartbeat       = @{}
     }
     foreach ($k in @($raw.Keys)) {
         if (-not $c.Contains($k) -or $k -eq 'ConfigPath') { throw "Unknown setting '$k' in $Path (check the spelling)" }
@@ -273,6 +278,20 @@ function Get-AgentConfig([string]$Path) {
         $bb[$k] = $c.Backblaze[$k]
     }
     $c.Backblaze = $bb
+    # Outside "I'm alive" check (e.g. Healthchecks.io). Used only when the URL file
+    # exists (panel-agent-setup.ps1 -SetHeartbeatUrl). Enabled = $false turns it off.
+    $hb = [ordered]@{
+        Enabled      = $true
+        EveryMinutes = 5
+        UrlFile      = 'secrets\panel-heartbeat-url.clixml'
+    }
+    foreach ($k in @($c.Heartbeat.Keys)) {
+        if (-not $hb.Contains($k)) { throw "Unknown Heartbeat setting '$k' in $Path" }
+        $hb[$k] = $c.Heartbeat[$k]
+    }
+    if ($hb.Enabled -isnot [bool]) { throw 'Heartbeat Enabled must be $true or $false' }
+    if ([int]$hb.EveryMinutes -lt 1) { throw 'Heartbeat EveryMinutes must be 1 or more' }
+    $c.Heartbeat = $hb
     foreach ($jobId in @($c.Jobs.Keys)) {
         $known = $false
         foreach ($j in $JobDefs) { if ($j.Id -eq $jobId) { $known = $true } }
@@ -330,6 +349,16 @@ function Test-CommandAllowed($Command, [string[]]$DoneIds) {
     return $res
 }
 
+# Name of an allowlisted task that is running right now, or $null.
+function Get-RunningAllowedTask {
+    foreach ($a in $AllowedActions) {
+        try {
+            foreach ($t in @(& $GetTaskHook $a.Task)) { if ([string]$t.State -eq 'Running') { return $a.Task } }
+        } catch { }
+    }
+    return $null
+}
+
 # Start the scheduled task behind an allowlisted action. Never throws.
 function Invoke-AllowedCommand([string]$Action) {
     $taskName = Get-AllowedTaskName $Action
@@ -340,6 +369,10 @@ function Invoke-AllowedCommand([string]$Action) {
     $state = [string]$task.State
     if ($state -eq 'Running') { return @{ Status = 'rejected'; Message = "'$taskName' is already running" } }
     if ($state -eq 'Disabled') { return @{ Status = 'rejected'; Message = "'$taskName' is disabled in Task Scheduler" } }
+    # One at a time: the backups share the disks and the network, so nothing starts
+    # while any of the six tasks is still running.
+    $busy = Get-RunningAllowedTask
+    if ($null -ne $busy) { return @{ Status = 'rejected'; Message = "'$busy' is running; start this after it has finished" } }
     try {
         & $StartTaskHook $task | Out-Null
         return @{ Status = 'started'; Message = "Started scheduled task '$taskName'" }
@@ -412,6 +445,7 @@ function Get-LogSummaries {
     $names = @()
     foreach ($j in $JobDefs) { $names += [string](Get-JobSetting $j 'LogFile') }
     $names += 'panel-agent.log'
+    $names += $ExtraLogs
     foreach ($n in $names) {
         $path = Join-Path $logDir $n
         $jobId = $null
@@ -546,6 +580,86 @@ function Get-BackblazeSummary {
     return $out
 }
 
+# ---------------------------------------------------------------------------
+# Outside heartbeat (Healthchecks.io or similar). After a report has reached
+# the panel, the agent opens the secret ping address (one HTTPS GET, no data).
+# If the pings stop - agent stopped, panel down or the whole server down - that
+# service e-mails the owner. The address is kept with DPAPI, never sent anywhere else.
+# ---------------------------------------------------------------------------
+function Test-HeartbeatUrl([string]$Url) {
+    return ($Url -cmatch '^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/[A-Za-z0-9._~%/-]+$')
+}
+
+# Returns the HTTP status code. Throws only when the service cannot be reached.
+function Invoke-HeartbeatRequest([string]$Url) {
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.Method = 'GET'
+    $req.AllowAutoRedirect = $false
+    $req.Timeout = 15000
+    $req.ReadWriteTimeout = 15000
+    $req.UserAgent = 'backup-panel-agent/' + $AgentVersion
+    $resp = $null
+    try { $resp = $req.GetResponse() }
+    catch {
+        $ex = $_.Exception
+        while ($null -ne $ex -and $ex -isnot [System.Net.WebException]) { $ex = $ex.InnerException }
+        if ($null -ne $ex -and $null -ne $ex.Response) { $resp = $ex.Response }
+        else { throw ('could not reach the heartbeat service (' + $_.Exception.Message + ')') }
+    }
+    try { return [int]$resp.StatusCode } finally { $resp.Close() }
+}
+
+function Get-HeartbeatUrl {
+    $cred = Read-SecretCredential (Resolve-AgentPath $Cfg.Heartbeat.UrlFile)
+    if ($null -eq $cred) { return $null }
+    return $cred.GetNetworkCredential().Password
+}
+
+# Ping when due (every EveryMinutes). Never throws.
+function Send-Heartbeat {
+    $hb = $Cfg.Heartbeat
+    if (-not $hb.Enabled) { return }
+    if (-not (Test-Path -LiteralPath (Resolve-AgentPath $hb.UrlFile))) { return }
+    $statePath = Join-Path $StateDir 'heartbeat.json'
+    $st = Read-JsonFile $statePath
+    $now = Get-UtcNow
+    $last = $null
+    $prevError = $null
+    if ($null -ne $st) {
+        $last = ConvertFrom-IsoTime ([string]$st.lastPingAt)
+        $prevError = [string]$st.lastError
+    }
+    # A quarter-minute of slack, because the agent itself runs once a minute.
+    if ($null -ne $last -and ($now - $last).TotalMinutes -lt ([double]$hb.EveryMinutes - 0.25)) { return }
+    $lastIso = $null
+    if ($null -ne $last) { $lastIso = ConvertTo-IsoTime $last }
+    $err = $null
+    try {
+        $url = Get-HeartbeatUrl
+        if (-not (Test-HeartbeatUrl $url)) { throw 'the saved heartbeat address is not a plain https address; run panel-agent-setup.ps1 -SetHeartbeatUrl again' }
+        $code = & $PingHook $url
+        if ([int]$code -ne 200) { throw ('the heartbeat service answered HTTP {0}' -f $code) }
+        $lastIso = ConvertTo-IsoTime $now
+    } catch {
+        $err = Protect-Text $_.Exception.Message 300
+        if ($err -ne $prevError) { Write-AgentLog ('Heartbeat failed: ' + $err) 'WARN' }
+    }
+    if ($null -eq $err -and $prevError) { Write-AgentLog 'Heartbeat works again.' }
+    try { Write-JsonFile $statePath ([ordered]@{ lastPingAt = $lastIso; lastAttemptAt = (ConvertTo-IsoTime $now); lastError = $err }) } catch { }
+}
+
+function Get-HeartbeatSummary {
+    $hb = $Cfg.Heartbeat
+    $on = [bool]($hb.Enabled -and (Test-Path -LiteralPath (Resolve-AgentPath $hb.UrlFile)))
+    $st = Read-JsonFile (Join-Path $StateDir 'heartbeat.json')
+    $out = [ordered]@{ enabled = $on; everyMinutes = [double]$hb.EveryMinutes; lastPingAt = $null; lastError = $null }
+    if ($null -ne $st) {
+        $out.lastPingAt = ConvertTo-SafeValue $st.lastPingAt 0
+        $out.lastError = ConvertTo-SafeValue $st.lastError 0
+    }
+    return $out
+}
+
 function New-AgentReport {
     $statusFiles = @()
     try { $statusFiles = @(Get-StatusFileSummaries) } catch { Add-CollectError ('Status files: ' + $_.Exception.Message) }
@@ -557,6 +671,8 @@ function New-AgentReport {
     try { $disks = @(Get-DiskSummaries) } catch { Add-CollectError ('Disks: ' + $_.Exception.Message) }
     $backblaze = $null
     try { $backblaze = Get-BackblazeSummary } catch { Add-CollectError ('Backblaze: ' + $_.Exception.Message) }
+    $heartbeat = $null
+    try { $heartbeat = Get-HeartbeatSummary } catch { Add-CollectError ('Heartbeat: ' + $_.Exception.Message) }
 
     $previous = Read-JsonFile (Join-Path $StateDir 'last-run.json')
     $recent = @()
@@ -580,6 +696,7 @@ function New-AgentReport {
             psVersion       = [string]$PSVersionTable.PSVersion
             recentErrors    = @($recent)
             collectErrors   = @($CollectErrors)
+            heartbeat       = $heartbeat
         }
         diskWarnFreeGB   = [double]$Cfg.DiskWarnFreeGB
         jobs             = @($jobs)
@@ -591,7 +708,9 @@ function New-AgentReport {
 }
 
 # ---------------------------------------------------------------------------
-# Talking to the panel (outbound HTTPS only)
+# Talking to the panel app on this machine (plain HTTP to 127.0.0.1 only; it
+# never leaves the server. The only calls that do are Backblaze and the
+# heartbeat, both over HTTPS with normal certificate checks.)
 # ---------------------------------------------------------------------------
 # Uses HttpWebRequest (not Invoke-RestMethod) so redirects are never followed and
 # every status code can be explained; PowerShell 5.1 hides both otherwise.
@@ -722,7 +841,7 @@ function Show-Discovery {
     foreach ($d in @(Get-DiskSummaries)) { Write-Host ('  {0} {1,8:N1} GB free of {2,8:N1} GB' -f $d.name, ($d.freeBytes / 1e9), ($d.sizeBytes / 1e9)) }
     Write-Host ''
     Write-Host 'Secret files (must open for THIS Windows user):'
-    foreach ($f in @($Cfg.TokenFile, $Cfg.Backblaze.KeyFile)) {
+    foreach ($f in @($Cfg.TokenFile, $Cfg.Backblaze.KeyFile, $Cfg.Heartbeat.UrlFile)) {
         $p = Resolve-AgentPath $f
         $state = 'not created'
         if (Test-Path -LiteralPath $p) {
@@ -784,6 +903,11 @@ function Invoke-AgentMain {
         Write-AgentLog $runError 'ERROR'
         Write-Verbose $runError
         $Script:ExitCode = 1
+    }
+
+    # Only a report that reached the panel counts as "alive".
+    if ($null -eq $runError) {
+        try { Send-Heartbeat } catch { Write-AgentLog ('Heartbeat: ' + $_.Exception.Message) 'WARN' }
     }
 
     # Remember how this run went; errors are shown on the panel by the next successful run.

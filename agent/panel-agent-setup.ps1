@@ -6,6 +6,7 @@
 #   .\panel-agent-setup.ps1 -NewToken                create the agent token and the fingerprint file the panel reads
 #   .\panel-agent-setup.ps1 -ShowTokenHash           print the fingerprint and write the file again
 #   .\panel-agent-setup.ps1 -SetBackblazeKey         save a READ-ONLY Backblaze key (bucket size and cost)
+#   .\panel-agent-setup.ps1 -SetHeartbeatUrl         save the outside "I'm alive" ping address (Healthchecks.io)
 #   .\panel-agent-setup.ps1 -InstallTask             create the "Backup Panel Agent" task (every minute)
 #   .\panel-agent-setup.ps1 -Status                  show the task, the last run and the agent log
 #   .\panel-agent-setup.ps1 -Disable                 stop the agent (kill switch)
@@ -18,6 +19,7 @@ param(
     [switch]$NewToken,
     [switch]$ShowTokenHash,
     [switch]$SetBackblazeKey,
+    [switch]$SetHeartbeatUrl,
     [switch]$InstallTask,
     [switch]$Status,
     [switch]$Disable,
@@ -105,6 +107,21 @@ if ($SetBackblazeKey) {
     Write-Host 'Now set Enabled = $true under Backblaze in panel-agent.config.psd1.'
 }
 
+if ($SetHeartbeatUrl) {
+    Write-Host 'Paste the ping address of your check (Healthchecks.io: the "Ping URL" on the check page,'
+    Write-Host 'like https://hc-ping.com/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).'
+    $url = (Read-Host 'Ping URL').Trim()
+    if (-not (Test-HeartbeatUrl $url)) { throw 'Not saved: that is not a plain https:// address (no spaces, no ? or #).' }
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+    Write-Host 'Sending one test ping...'
+    $code = Invoke-HeartbeatRequest $url
+    if ($code -ne 200) { throw ('Not saved: the service answered HTTP {0}. Check the address.' -f $code) }
+    Write-Host 'Ping accepted (HTTP 200). The check on the website should now show "up".'
+    Save-Secret $Cfg.Heartbeat.UrlFile 'heartbeat' (ConvertTo-SecureString $url -AsPlainText -Force)
+    $url = $null
+    Write-Host ('The agent now pings every {0} minutes after each report that reaches the panel.' -f $Cfg.Heartbeat.EveryMinutes)
+}
+
 if ($InstallTask) {
     if ($null -eq (Read-SecretCredential (Resolve-AgentPath $Cfg.TokenFile))) { throw 'Create the token first: .\panel-agent-setup.ps1 -NewToken' }
     try {
@@ -164,6 +181,6 @@ if ($Status) {
     }
 }
 
-if (-not ($NewToken -or $ShowTokenHash -or $SetBackblazeKey -or $InstallTask -or $Status -or $Disable -or $Enable)) {
-    Write-Host 'Nothing to do. Use one of: -NewToken -ShowTokenHash -SetBackblazeKey -InstallTask -Status -Disable -Enable'
+if (-not ($NewToken -or $ShowTokenHash -or $SetBackblazeKey -or $SetHeartbeatUrl -or $InstallTask -or $Status -or $Disable -or $Enable)) {
+    Write-Host 'Nothing to do. Use one of: -NewToken -ShowTokenHash -SetBackblazeKey -SetHeartbeatUrl -InstallTask -Status -Disable -Enable'
 }

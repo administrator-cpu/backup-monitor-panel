@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Private</title>
+    <link rel="icon" href="/gate/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/gate/gate.css" />
+    <script type="module" src="/gate/gate.js"></script>
+  </head>
+  <body>
+    <main class="gate" aria-labelledby="gate-title">
+      <div class="gate-seal" aria-hidden="true">
+        <svg viewBox="0 0 32 32" focusable="false">
+          <rect class="seal-body" x="7" y="14" width="18" height="13" rx="2.5" />
+          <path class="seal-shackle" d="M11 14v-3.5a5 5 0 0 1 10 0V14" />
+          <circle class="seal-hole" cx="16" cy="19.6" r="1.7" />
+          <path class="seal-hole" d="M16 20.6v3" />
+        </svg>
+      </div>
+      <h1 id="gate-title">Private area</h1>
+      <p class="lede">Enter the gate key to continue. Then you sign in as usual.</p>
+
+      <form id="gate-form" novalidate>
+        <!-- Lets a password manager save the key as a normal login. -->
+        <input class="visually-hidden" type="text" name="username" value="backup-panel-gate" autocomplete="username" tabindex="-1" aria-hidden="true" />
+        <label for="gate-key">Gate key</label>
+        <div class="key-field">
+          <input id="gate-key" name="password" type="password" autocomplete="current-password" autocapitalize="characters"
+            spellcheck="false" maxlength="40" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" required aria-describedby="gate-hint" />
+          <button type="button" id="gate-show" class="key-show" aria-pressed="false" aria-controls="gate-key">Show</button>
+        </div>
+        <p id="gate-hint" class="hint">20 letters and digits. Dashes and spaces don't matter.</p>
+
+        <label class="remember"><input type="checkbox" id="gate-remember" checked /> <span>Remember this device for 30 days</span></label>
+
+        <p id="gate-error" class="gate-error" role="alert" hidden></p>
+        <button type="submit" id="gate-submit" class="gate-btn">Continue</button>
+      </form>
+    </main>
+    <p class="gate-foot">Keys are checked by the server. Nothing is stored except on this device.</p>
+  </body>
+</html>

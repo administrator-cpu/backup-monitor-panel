@@ -7,7 +7,10 @@ import { ACTIONS } from '../src/actions.js';
 import {
   actionState, commandsMode, diskForecast, freeSlope, freshness, jobHealth, resultText, verdict,
 } from '../public/js/health.js';
-import { ago, binBytes, decBytes, duration, makeFormatter } from '../public/js/format.js';
+import { ago, binBytes, dayLabel, decBytes, duration, makeFormatter, zoneLabel, zoneOffsetMinutes } from '../public/js/format.js';
+import {
+  coverageOf, driveTotals, filterPoints, hasRestoreData, historyGoal, restoreSets, SUMMARY_STALE_HOURS, summaryAgeHours,
+} from '../public/js/points.js';
 
 const NOW = Date.parse('2026-11-11T08:00:00Z');
 const fmt = makeFormatter('Asia/Kolkata');
@@ -114,6 +117,55 @@ test('Run-now switches and button availability', () => {
   assert.match(actionState(stale, action('run-pg-backup'), NOW).reason, /not reporting/);
   const done = state(() => {}, { commands: [{ id: 'x', action: 'run-pg-backup', status: 'started', requested_at: hoursAgo(1) }] });
   assert.equal(actionState(done, action('run-pg-backup'), NOW).enabled, true, 'a finished command does not block the button');
+  const otherRunning = state((d) => { d.jobs[2].backup.task.state = 'Running'; });
+  for (const id of ['run-pg-backup', 'run-mongo-check']) {
+    const st = actionState(otherRunning, action(id), NOW);
+    assert.equal(st.enabled, false, `${id} waits while the file backup runs`);
+    assert.match(st.reason, /Files Nightly Backup.*one task runs at a time/);
+  }
+});
+
+test('restore points from the morning checks', () => {
+  const data = sampleReport();
+  assert.equal(hasRestoreData(data), false);
+  const drive = (id, days) => ({ id, provider: 'Google Drive', location: `gcrypt:${id}`, count: days.length, oldest: days[days.length - 1], newest: days[0], storedBytes: 300, points: days.map((d) => ({ id: d, date: d, bytes: 100, files: 3 })) });
+  data.statusFiles.push(
+    { name: 'pg-snapshots.json', job: 'pg', content: { kind: 'pg', checkedAt: hoursAgo(2), check: { ok: true, problems: [] }, sets: [drive('pg', ['2026-11-11', '2026-11-10', '2026-11-09'])], coverage: { databases: ['app'], missing: ['newdb'] }, drive: { totalBytes: 2e12, usedBytes: 1e11, otherBytes: 1e9, freeBytes: 1.9e12 } } },
+    { name: 'files-snapshots.json', job: 'files', content: { kind: 'files', checkedAt: hoursAgo(40), check: { ok: true, problems: [] }, sets: [{ id: 'logs', provider: 'Backblaze B2', location: 'restic-logs', count: 2, oldest: '2025-11-11T00:00:00Z', newest: hoursAgo(5), storedBytes: 5e9, points: [{ id: 'aaaa1111', time: hoursAgo(5) }, { id: 'bbbb2222', time: '2025-11-11T00:00:00Z' }], paths: ['F:\\syslog-data'] }] } },
+  );
+  assert.equal(hasRestoreData(data), true);
+  const rows = restoreSets(data);
+  assert.deepEqual(rows.map((r) => [r.def.id, !!r.summary, !!r.set]), [['pg', true, true], ['mongo', false, false], ['logs', true, true], ['files', true, false]]);
+
+  const day = makeFormatter('Asia/Kolkata').day;
+  assert.equal(filterPoints(rows[0].set.points, { from: '2026-11-10' }, day).length, 2);
+  assert.equal(filterPoints(rows[0].set.points, { from: '2026-11-10', to: '2026-11-10' }, day).length, 1);
+  assert.equal(filterPoints(rows[2].set.points, { to: '2025-12-31' }, day).length, 1, 'restic points filter by their day');
+
+  const goal = historyGoal(rows[2].set, 3, NOW);
+  assert.equal(Math.round(goal.ageDays), 365);
+  assert.equal(goal.met, false);
+  assert.ok(Math.abs(goal.ratio - 1 / 3) < 0.01);
+  assert.equal(new Date(goal.metAt).toISOString().slice(0, 10), '2028-11-10');
+
+  assert.ok(summaryAgeHours(rows[2].summary, NOW) > SUMMARY_STALE_HOURS, 'a file check that did not refresh its list is noticed');
+  assert.deepEqual(coverageOf(rows[0]), { what: 'databases', items: ['app'], missing: ['newdb'] });
+  assert.deepEqual(coverageOf(rows[2]).items, ['F:\\syslog-data']);
+
+  const d = driveTotals(data);
+  assert.equal(d.backupBytes, 300);
+  assert.equal(d.accountUsed, 1.01e11);
+  assert.equal(dayLabel('2026-11-09'), '9 Nov 2026');
+  assert.equal(dayLabel('nonsense'), '—');
+});
+
+test('time zones: server time by default, the viewer can switch', () => {
+  assert.equal(zoneOffsetMinutes('Asia/Kolkata', NOW), 330);
+  assert.equal(zoneOffsetMinutes('UTC', NOW), 0);
+  assert.equal(zoneOffsetMinutes('America/New_York', NOW), -300);
+  assert.equal(zoneLabel('Asia/Kolkata', NOW), 'Kolkata, UTC+05:30');
+  assert.equal(zoneLabel('America/New_York', NOW), 'New York, UTC−05:00');
+  assert.equal(makeFormatter('Europe/London').time('2026-11-10T20:30:00Z'), '10 Nov, 20:30');
 });
 
 test('disk forecast from daily free space', () => {

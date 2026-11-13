@@ -13,6 +13,7 @@
     "dev": "node src/server.js --config dev/panel.config.dev.json",
     "dev:setup-login": "node src/setup-login.js --config dev/panel.config.dev.json",
     "test": "node --test test/*.test.js",
-    "test:agent": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File agent/tests/run-agent-tests.ps1"
+    "test:agent": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File agent/tests/run-agent-tests.ps1",
+    "test:checks": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File server-scripts/tests/run-check-tests.ps1"
   }
 }

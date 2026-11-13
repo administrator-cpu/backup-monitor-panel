@@ -95,15 +95,19 @@ try {
         $script:FakeTasks[$Name] = [pscustomobject]@{ TaskName = $Name; TaskPath = '\'; State = $State; FailStart = $FailStart }
     }
     Set-FakeTask 'Postgres Nightly Backup' 'Ready'
-    Set-FakeTask 'MongoDB Nightly Backup' 'Running'
+    Set-FakeTask 'MongoDB Nightly Backup' 'Ready'
     Set-FakeTask 'Postgres Backup Check' 'Disabled'
     Set-FakeTask 'MongoDB Backup Check' 'Ready' $true
 
     $res = Invoke-AllowedCommand 'run-pg-backup'
     Assert ($res.Status -eq 'started' -and $script:Started -contains 'Postgres Nightly Backup') 'ready task is started'
     $script:Started.Clear()
+    Set-FakeTask 'MongoDB Nightly Backup' 'Running'
     $res = Invoke-AllowedCommand 'run-mongo-backup'
     Assert ($res.Status -eq 'rejected' -and $res.Message -match 'already running' -and $script:Started.Count -eq 0) 'running task is not started twice'
+    $res = Invoke-AllowedCommand 'run-pg-backup'
+    Assert ($res.Status -eq 'rejected' -and $res.Message -match "'MongoDB Nightly Backup' is running" -and $script:Started.Count -eq 0) 'nothing starts while another backup is running'
+    Set-FakeTask 'MongoDB Nightly Backup' 'Ready'
     $res = Invoke-AllowedCommand 'run-pg-check'
     Assert ($res.Status -eq 'rejected' -and $res.Message -match 'disabled' -and $script:Started.Count -eq 0) 'disabled task is not started'
     $res = Invoke-AllowedCommand 'run-files-check'
@@ -223,13 +227,57 @@ try {
     Assert $threw 'CommandsEnabled must be a real boolean'
     $threw = $false; [System.IO.File]::WriteAllText($bad, "@{ PanelUrl = 'http://127.0.0.1:7480'; Backblaze = @{ Enabeld = `$true } }"); try { [void](Get-AgentConfig $bad) } catch { $threw = $_.Exception.Message -match 'Backblaze' }
     Assert $threw 'misspelt Backblaze setting is rejected'
+    $threw = $false; [System.IO.File]::WriteAllText($bad, "@{ PanelUrl = 'http://127.0.0.1:7480'; Heartbeat = @{ Url = 'x' } }"); try { [void](Get-AgentConfig $bad) } catch { $threw = $_.Exception.Message -match 'Heartbeat' }
+    Assert $threw 'unknown Heartbeat setting is rejected (the address belongs in the secret file)'
     $okCfg = Get-AgentConfig (Join-Path (Split-Path -Parent $PSScriptRoot) 'panel-agent.config.psd1')
     Assert ($okCfg.CommandsEnabled -eq $false -and $okCfg.Backblaze.Enabled -eq $false) 'shipped config starts read-only'
     Assert ($okCfg.PanelUrl -eq 'http://127.0.0.1:7480') 'shipped config points at the local panel app'
+    Assert ($okCfg.Heartbeat.Enabled -eq $true -and $okCfg.Heartbeat.EveryMinutes -eq 5) 'shipped config pings every 5 minutes once an address is saved'
+
+    # ------------------------------------------------------------------
+    Write-Host 'Heartbeat'
+    $hbUrl = 'https://hc-ping.com/0f8fad5b-d9cb-469f-a165-70867728950e'
+    Assert (Test-HeartbeatUrl $hbUrl) 'a Healthchecks ping address is accepted'
+    Assert (-not (Test-HeartbeatUrl 'http://hc-ping.com/abc')) 'plain http is refused'
+    Assert (-not (Test-HeartbeatUrl 'https://hc-ping.com/abc?x=1')) 'query strings are refused'
+    Assert (-not (Test-HeartbeatUrl 'https://hc-ping.com/a b')) 'spaces are refused'
+    Assert (-not (Test-HeartbeatUrl 'https://hc-ping.com')) 'an address without a path is refused'
+    $script:Pings = New-Object System.Collections.ArrayList
+    $script:PingCode = 200
+    $PingHook = { param([string]$Url) [void]$script:Pings.Add($Url); return $script:PingCode }
+    $hbState = Join-Path $StateDir 'heartbeat.json'
+    Send-Heartbeat
+    Assert ($script:Pings.Count -eq 0 -and -not (Test-Path $hbState)) 'no ping before an address is saved'
+    $hbFile = Resolve-AgentPath $Cfg.Heartbeat.UrlFile
+    New-Object System.Management.Automation.PSCredential('heartbeat', (ConvertTo-SecureString $hbUrl -AsPlainText -Force)) | Export-Clixml -LiteralPath $hbFile
+    Send-Heartbeat
+    $st = Read-JsonFile $hbState
+    Assert ($script:Pings.Count -eq 1 -and $script:Pings[0] -eq $hbUrl -and $st.lastPingAt -and -not $st.lastError) 'first run pings and remembers when'
+    Send-Heartbeat
+    Assert ($script:Pings.Count -eq 1) 'no second ping within 5 minutes'
+    Write-JsonFile $hbState ([ordered]@{ lastPingAt = (ConvertTo-IsoTime ((Get-UtcNow).AddMinutes(-6))); lastAttemptAt = $null; lastError = $null })
+    $script:PingCode = 500
+    Send-Heartbeat
+    $st = Read-JsonFile $hbState
+    Assert ($script:Pings.Count -eq 2 -and $st.lastError -match '500' -and $st.lastPingAt) 'a refused ping is recorded as an error and keeps the last good time'
+    $script:PingCode = 200
+    Send-Heartbeat
+    $st = Read-JsonFile $hbState
+    Assert ($script:Pings.Count -eq 3 -and -not $st.lastError) 'after an error the next run tries again'
+    $log = Get-Content -LiteralPath $AgentLogPath -Raw
+    Assert ($log -match 'Heartbeat failed' -and $log -match 'Heartbeat works again' -and $log -notmatch 'hc-ping') 'heartbeat problems are logged without the address'
+    $Cfg.Heartbeat.Enabled = $false
+    Write-JsonFile $hbState ([ordered]@{ lastPingAt = $null; lastAttemptAt = $null; lastError = $null })
+    Send-Heartbeat
+    Assert ($script:Pings.Count -eq 3) 'Enabled = $false stops the pings'
+    $Cfg.Heartbeat.Enabled = $true
+    $hbSum = Get-HeartbeatSummary
+    Assert ($hbSum.enabled -eq $true -and $hbSum.everyMinutes -eq 5) 'the report says the heartbeat is on'
 
     # ------------------------------------------------------------------
     Write-Host 'Full report on a fake server folder'
     [System.IO.File]::WriteAllText((Join-Path $tmp 'status\pg-last-success.json'), '{"time":"2026-11-11T02:05:00+05:30","sizeBytes":123456789,"databases":["app"],"pgPassword":"nope"}')
+    [System.IO.File]::WriteAllText((Join-Path $tmp 'status\last-success.json'), '{"time":"2026-11-11T02:05:00+05:30","databases":["app"]}')
     [System.IO.File]::WriteAllText((Join-Path $tmp 'status\mongo-last-failure.json'), '{"time":"2026-11-10T02:31:00+05:30","error":"mongodump exited 1 uri mongodb://root:Hunter22@localhost"}')
     '{"sets":[{"name":"logs","added":"40 MB"}],"finished":"2026-11-11T03:33:00+05:30"}' | Out-File -LiteralPath (Join-Path $tmp 'status\files-last-success.json') -Encoding Unicode
     [System.IO.File]::WriteAllText((Join-Path $tmp 'status\other.json'), 'not json')
@@ -255,6 +303,9 @@ try {
     Assert (@($back.disks).Count -ge 1 -and $back.disks[0].sizeBytes -gt 0) 'disks are listed'
     Assert ($back.agent.commandsEnabled -eq $true -and @($back.agent.enabledActions) -notcontains 'run-files-backup') 'report lists enabled actions without the disabled one'
     Assert ($back.backblaze.enabled -eq $false) 'Backblaze off by default'
+    Assert (@($pg.statusFiles) -contains 'last-success.json') 'the Postgres check file last-success.json belongs to the Postgres card'
+    Assert ($back.agent.heartbeat.enabled -eq $true -and $json -notmatch 'hc-ping') 'report shows the heartbeat state, never its address'
+    Assert (@($back.logs | Where-Object { $_.name -eq 'nginx-reload.log' }).Count -eq 1) 'the Nginx reload log is watched too'
     Assert ($json.Length -lt 200000) ('report is small ({0:N0} bytes)' -f $json.Length)
 
     # ------------------------------------------------------------------
