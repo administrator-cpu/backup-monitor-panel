@@ -2,8 +2,10 @@
 
 Everything happens **on the server** (logged in over RDP as Administrator, the user
 that runs the backup tasks), except creating one DNS record. Each step says why and
-what you should see. It takes about 45 minutes. Nothing here changes your backup
-scripts, the syslog collector or the routers, and nothing deletes anything.
+what you should see. It takes about 45 minutes. Only Part 11 touches your backup
+scripts: it adds a few lines to the three morning checks, after keeping a copy of them.
+Nothing here changes the backups themselves, the syslog collector or the routers, and
+nothing deletes anything.
 
 ## How it works (one minute)
 
@@ -21,8 +23,10 @@ scripts, the syslog collector or the routers, and nothing deletes anything.
   written into the agent script itself, so nothing on the panel can add to it. The panel
   app itself cannot start any program, restore or delete anything.
 - **One limit to know:** the panel runs on the server it watches. If the server is
-  down, the panel is down too. Your existing morning check e-mails remain the alarm
-  for that.
+  down, the panel is down too. That's why Part 10 adds an outside "I'm alive" check
+  (free) that e-mails you when the server goes quiet.
+- **Two doors:** strangers first meet a gate page that wants a gate key (Part 12), and
+  only then the panel's own sign-in with password and authenticator code.
 
 The panel uses these places on the server:
 
@@ -34,6 +38,11 @@ The panel uses these places on the server:
 | `C:\Apps\db-backup\panel-data\state.json` | the panel's data (created automatically) |
 | `C:\Apps\db-backup\secrets\panel-login.json` | password hash and authenticator key |
 | `C:\Apps\db-backup\secrets\panel-agent-token.*` | the agent token (DPAPI) and its fingerprint |
+| `C:\Apps\db-backup\secrets\panel-heartbeat-url.clixml` | the outside alert's ping address (DPAPI, Part 10) |
+| `C:\Apps\db-backup\panel-status.ps1` | helper the morning checks use to list restore points (Part 11) |
+| `C:\Apps\db-backup\status\*-snapshots.json` | the restore-point lists those checks write |
+| `C:\nginx-1.30.2\conf\backup-panel-gate.conf` | the gate key Nginx checks (Part 12) |
+| `C:\Apps\db-backup\logs\nginx-reload.log` | what the certificate reload task did (Part 13) |
 
 The `secrets` folder is already left out of the file backups.
 
@@ -223,8 +232,15 @@ git pull
 Test-Path deploy\nginx-backup-panel.http-only.conf
 ```
 Then:
+Put **your real name** (the one you created in DNS in Step 1) between the quotes. Don't use
+the example `backups.yourdomain.com`: `yourdomain.com` is someone else's real website.
 ```
 $name = 'backups.yourdomain.com'
+Resolve-DnsName $name -Type A | Select-Object Name, IPAddress
+```
+The `IPAddress` must be **your server's public IP**. If you get an error or a different IP,
+stop: either the name in `$name` is wrong, or the DNS record isn't there yet. Then:
+```
 cd C:\nginx-1.30.2
 if (-not (Test-Path conf\nginx.conf.before-backup-panel)) { Copy-Item conf\nginx.conf conf\nginx.conf.before-backup-panel }
 (Get-Content C:\Apps\db-backup\panel\deploy\nginx-backup-panel.http-only.conf -Raw).Replace('backups.example.com', $name) | Set-Content conf\backup-panel.conf -Encoding ASCII
@@ -242,11 +258,6 @@ It must go at the **end**, after all your other sites. Nginx treats the first si
 for a port as the default for unknown names, so at the end the new name can never stand in
 for another site.
 
-*Prefer to paste the blocks straight into `nginx.conf` instead of using a separate file?*
-That works the same. Paste the contents of `conf\backup-panel.conf` (from the commands above,
-with your name already filled in) at the same place: just above the last `}`. In Step 5,
-replace that pasted part with the full version. The separate file is suggested only because
-`nginx.conf` then changes by one line, which is easier to check and to undo.
 Save, then test and reload:
 ```
 .\nginx.exe -t
@@ -257,15 +268,24 @@ Only then:
 .\nginx.exe -s reload
 ```
 
+*Prefer to paste the blocks straight into `nginx.conf` instead of using a separate file?*
+That works the same. Paste the contents of `conf\backup-panel.conf` (from the commands above,
+with your name already filled in) at the same place: just above the last `}`. In Step 5,
+replace that pasted part with the full version. The separate file is suggested only because
+`nginx.conf` then changes by one line, which is easier to check and to undo.
+
 ### Step 3: Check that Let's Encrypt will reach the name (server, then PC)
 
 ```
 New-Item -ItemType Directory -Force html\acme\.well-known\acme-challenge | Out-Null
 Set-Content html\acme\.well-known\acme-challenge\panel-test.txt 'panel test ok' -Encoding ASCII
+"Open this on your PC:  http://$name/.well-known/acme-challenge/panel-test.txt"
 ```
-On your **PC**, open `http://backups.yourdomain.com/.well-known/acme-challenge/panel-test.txt`
-in a browser. It must show `panel test ok`. If it doesn't, don't go on: Let's Encrypt
-blocks a name for an hour after five failed tries. Then remove the test file:
+The last line prints the exact address with your name in it. Open **that** address in a
+browser on your PC. It must show `panel test ok`. If it doesn't, don't go on: Let's Encrypt
+blocks a name for an hour after five failed tries. (A page from a firewall such as Sucuri or
+Cloudflare means the address isn't reaching your server; check the name and its DNS record.)
+Then remove the test file:
 ```
 Remove-Item html\acme\.well-known\acme-challenge\panel-test.txt
 ```
@@ -286,6 +306,12 @@ You should see four files: `-chain.pem`, `-chain-only.pem`, `-crt.pem`, `-key.pe
 
 ### Step 5: Switch to the full file (server)
 
+The full file also puts the gate page in front of the sign-in, so make the gate key
+first (it prints the key once; save it in your password manager, see Part 12):
+```
+powershell -ExecutionPolicy Bypass -File C:\Apps\db-backup\panel\deploy\set-gate-key.ps1
+```
+Then:
 ```
 (Get-Content C:\Apps\db-backup\panel\deploy\nginx-backup-panel.conf -Raw).Replace('backups.example.com', $name) | Set-Content conf\backup-panel.conf -Encoding ASCII
 .\nginx.exe -t
@@ -297,10 +323,13 @@ Again `syntax is ok` and `test is successful`, then:
 
 ### Step 6: Try it (PC or phone)
 
-- `https://backups.yourdomain.com` shows the sign-in page with a valid padlock.
-- `http://backups.yourdomain.com` goes to the https address by itself.
-- `https://backups.yourdomain.com/api/agent/report` shows a 404 page. That's intended: the
-  agent's address is never public.
+On the server, print the addresses with your name in them:
+```
+"https://$name"; "http://$name"; "https://$name/api/agent/report"
+```
+- The first shows the gate page with a valid padlock; after the gate key, the sign-in page.
+- The second goes to the https address by itself.
+- The third shows a 404 page. That's intended: the agent's address is never public.
 
 Port 443 is already open for your other sites. Port 7480 is not opened anywhere, because
 the app only listens on 127.0.0.1. The Nginx file also limits sign-in attempts and keeps its
@@ -367,6 +396,152 @@ Good to know:
 | Sign everyone out | `pm2 restart backup-panel`. |
 | Lost your phone | Run `npm run setup-login` again: new password and new authenticator key. Then `pm2 restart backup-panel`. |
 | Replace the agent token | `.\panel-agent-setup.ps1 -NewToken -Force`. The panel picks up the new fingerprint by itself. |
+| Pause the outside alert (planned maintenance) | On healthchecks.io, open the check and click **Pause**. It wakes up by itself with the next ping. To stop the pings for good: `Heartbeat = @{ Enabled = $false }` in `panel-agent.config.psd1`. |
+| Lock out a lost laptop or phone | Make a new gate key (Part 12, step 1, then `-t` and reload). Every device must enter the new key once. Also run `npm run setup-login` if the password may be known. |
+
+## Part 10: Outside alert when the server goes quiet (free, no card)
+
+Why: the panel lives on the server, so if the server dies, nothing on it can tell you.
+After every report that reaches the panel, the agent opens a secret web address at
+**healthchecks.io** (one tiny HTTPS request, no data at all). If those pings stop for
+15 minutes (agent stopped, panel crashed or the whole server down), healthchecks.io
+e-mails you, and again when it recovers. The free plan asks only for your e-mail
+address; no credit card.
+
+1. **On your PC:** go to `https://healthchecks.io`, choose **Sign Up**, enter your e-mail
+   address and open the log-in link it sends you.
+2. In your project, open the check that is already there (or **Add Check**). Name it
+   `Backup server`. Click **Change Schedule** and set **Period: 5 minutes** and
+   **Grace Time: 10 minutes**, then **Save**.
+3. Copy the check's **Ping URL**. It looks like `https://hc-ping.com/` followed by a long
+   code. Treat it like a password: anyone who has it can send fake "alive" pings.
+4. Under **Integrations** your e-mail address is already listed. Add Telegram or others
+   there if you like.
+5. **On the server** (after `git pull` and copying the agent, see "Updating later"):
+   ```
+   cd C:\Apps\db-backup
+   .\panel-agent-setup.ps1 -SetHeartbeatUrl
+   ```
+   Paste the Ping URL when asked. You should see `Ping accepted (HTTP 200)` and `Saved`, and
+   the check on the website turns green. Nothing in `panel-agent.config.psd1` needs changing.
+6. Within 5 minutes the panel's **Server agent** section shows `Outside alert: On · pinged ...`.
+
+To try it: `.\panel-agent-setup.ps1 -Disable`, wait about 15 minutes for the "DOWN" e-mail,
+then `.\panel-agent-setup.ps1 -Enable` and you get an "UP" e-mail a few minutes later.
+
+## Part 11: Restore points (what you could restore from)
+
+Why: so the panel lists every backup you can restore from, with its date, size and ID; shows
+which databases and folders are covered; shows the 3-year log history; and shows how much
+Google Drive space the backups use. Your three morning checks already see all of this. With
+this part they also write it to small files in `status\` that the agent passes on, so neither
+the agent nor the panel ever needs a backup password.
+
+The three checks get a few extra lines, and a helper file `panel-status.ps1` next to them. The
+new lines can't change what a check reports or e-mails: if anything in them goes wrong, it is
+only written to the log as a warning.
+
+1. Get the new files:
+   ```
+   cd C:\Apps\db-backup\panel
+   git pull
+   cd C:\Apps\db-backup
+   ```
+2. Check that your current check scripts are the ones the changes were made from:
+   ```
+   Get-FileHash pg-backup-check.ps1, mongo-backup-check.ps1, files-backup-check.ps1 | Select-Object @{n='File';e={Split-Path $_.Path -Leaf}}, Hash
+   ```
+   You should see exactly:
+   ```
+   pg-backup-check.ps1     77712D0A2EC1BFCA24F0AFCA960BB510ED4E8E370BFEE4BA335BB5FD9C0B186A
+   mongo-backup-check.ps1  811BFC29C44C3799AEDFA2D0A7B11C8B562A38365C2E9770797115517B008CAF
+   files-backup-check.ps1  63169614B42E925860234461CD79472EF16AF3185935A0C8AFC027794A649492
+   ```
+   **If any line differs, stop here:** that script was changed since, and copying would undo
+   the change. Send the differing script instead.
+3. Keep your current versions (only the first time), then copy the new ones and the helper:
+   ```
+   if (-not (Test-Path before-panel)) { New-Item -ItemType Directory before-panel | Out-Null; Copy-Item pg-backup-check.ps1, mongo-backup-check.ps1, files-backup-check.ps1 before-panel\ }
+   Copy-Item panel\server-scripts\pg-backup-check.ps1, panel\server-scripts\mongo-backup-check.ps1, panel\server-scripts\files-backup-check.ps1, panel\server-scripts\panel-status.ps1 .\ -Force
+   ```
+4. Run the three checks once now, through Task Scheduler so they run as their usual user.
+   They only e-mail if they find a problem, exactly as every morning:
+   ```
+   Start-ScheduledTask -TaskName 'Postgres Backup Check'
+   Start-ScheduledTask -TaskName 'MongoDB Backup Check'
+   Start-ScheduledTask -TaskName 'Files Backup Check'
+   ```
+5. A few minutes later:
+   ```
+   Get-ChildItem status\*-snapshots.json
+   ```
+   You should see `pg-snapshots.json`, `mongo-snapshots.json` and `files-snapshots.json`.
+   The panel now shows **Restore points**, **What is backed up** and a **Google Drive** card.
+
+To undo: `Copy-Item before-panel\*.ps1 .\ -Force`. The helper and the `*-snapshots.json`
+files then simply stop being updated.
+
+## Part 12: Gate page in front of the sign-in
+
+Why: without it, anyone on the internet can reach the sign-in page and try passwords.
+With it, Nginx itself turns strangers away unless their browser holds the **gate key**,
+before anything reaches the panel app. It's a normal page in the panel's style, not the
+browser's grey pop-up. A device remembers the key for 30 days.
+
+1. **Make the gate key** (server):
+   ```
+   powershell -ExecutionPolicy Bypass -File C:\Apps\db-backup\panel\deploy\set-gate-key.ps1
+   ```
+   It prints a key like `ABCDE-FGHJK-LMNPQ-RSTUV` **once**. Save it in your password
+   manager. It writes `C:\nginx-1.30.2\conf\backup-panel-gate.conf`.
+2. **Use the Nginx file with the gate.** If you use the `include` line, run the copy command
+   from Part 6, step 5 again (with `$name` set as in Part 6, step 2). If you pasted the panel
+   blocks into `nginx.conf`, replace everything you pasted for the panel with the new
+   contents of `conf\backup-panel.conf` made by that command.
+3. Test and reload:
+   ```
+   cd C:\nginx-1.30.2
+   .\nginx.exe -t
+   ```
+   Only after `test is successful`:
+   ```
+   .\nginx.exe -s reload
+   ```
+4. **On your PC**, open `https://` plus your panel name. You see the **Private area** page.
+   Enter the key and you get the usual sign-in. Your password manager can save the key.
+
+To change the key (or lock out a lost device), repeat steps 1 and 3. The old key file is kept
+as `backup-panel-gate.conf.previous`.
+
+## Part 13: Reload Nginx after certificate renewals (all sites)
+
+Why: win-acme renews your certificates into `C:\nginx-1.30.2\ssl`, but your renewals are set
+up without an installation step, so nothing tells Nginx. Nginx only reads certificates when
+it starts or reloads, so after a renewal it keeps serving the old certificate until something
+restarts it, and when that old one expires browsers say "certificate expired". This applies
+to **all** your sites, not only the panel.
+
+The task checks twice a day whether any certificate file is newer than Nginx's last reload. If
+so, it runs `nginx -t`, and **only if that passes** `nginx -s reload`, which drops no
+connection. If the test fails, it reloads nothing and writes an ERROR line, so a mistake in
+`nginx.conf` can never take the sites down.
+
+1. Run one check by hand (server):
+   ```
+   powershell -ExecutionPolicy Bypass -File C:\Apps\db-backup\panel\deploy\nginx-reload-on-renewal.ps1
+   ```
+   You should see either `No certificate changed since ...; nothing to do.` or
+   `Renewed certificate(s) found: ...` followed by `Nginx reloaded`. The second is
+   expected if certificates were renewed since Nginx last started.
+2. Create the task (runs as SYSTEM every day at 10:30 and 22:30):
+   ```
+   powershell -ExecutionPolicy Bypass -File C:\Apps\db-backup\panel\deploy\nginx-reload-on-renewal.ps1 -Install
+   ```
+3. Any time later:
+   ```
+   powershell -ExecutionPolicy Bypass -File C:\Apps\db-backup\panel\deploy\nginx-reload-on-renewal.ps1 -Status
+   ```
+   The panel also shows `nginx-reload.log` under **From the server > Log tails**.
 
 ## Updating later
 
@@ -375,20 +550,27 @@ cd C:\Apps\db-backup\panel
 git pull
 copy agent\panel-agent.ps1 ..\
 copy agent\panel-agent-setup.ps1 ..\
+copy server-scripts\panel-status.ps1 ..\
 pm2 restart backup-panel
 ```
 
 Your settings stay as they are: `panel.config.json` isn't in git, and
 `panel-agent.config.psd1` isn't copied again. If a new release adds a setting, the release
-notes say so. Restarting the panel signs you out.
+notes say so. Restarting the panel signs you out. The gate page and the reload task are used
+straight from this folder, so `git pull` updates them. The three check scripts are copied only
+once (Part 11), never by an update.
 
 ## What the agent sends, and what it never sends
 
 **Sends (to 127.0.0.1 only):** for the six tasks, their state, last and next run time and
-result code; the contents of `status\*.json`, with any field whose name looks like a password,
-key or token replaced by `(hidden)`; the last 40 lines of the three backup logs and its own log,
-with passwords, keys and `user:password@` in addresses blanked; disk sizes; Backblaze byte
-and file counts.
+result code; the contents of `status\*.json` (including the restore-point lists from Part 11),
+with any field whose name looks like a password, key or token replaced by `(hidden)`; the last
+40 lines of the three backup logs, the reload log and its own log, with passwords, keys and
+`user:password@` in addresses blanked; disk sizes; Backblaze byte and file counts; whether the
+outside alert is working.
+
+**To the outside alert (Part 10):** only an empty HTTPS request to the ping address, every
+5 minutes. No data.
 
 **Never sends:** anything from `secrets\`, environment variables, the restic password, database
 contents or router syslog contents. Run `.\panel-agent.ps1 -DryRun` at any time to see the
@@ -411,6 +593,14 @@ exact report.
 | A card says "Task missing" | The scheduled task's name differs from the list in `$AllowedActions` at the top of `panel-agent.ps1`. Compare with `.\panel-agent.ps1 -Discover` and Task Scheduler. |
 | `pm2 logs`: "panel.config.json not found" | Part 2, step 2: copy `panel.config.example.json` to `panel.config.json`. |
 | `pm2 logs backup-panel` shows nothing at all, and `http://127.0.0.1:7480` does not open | The code is older than the PM2 fix. Run `git pull`, then `pm2 restart backup-panel`. |
+| `nginx -t`: "open() ... backup-panel-gate.conf failed" | The gate key file isn't made yet: Part 12, step 1. |
+| Gate page: "That key is not right." | Copy the key again from your password manager. Dashes, spaces and lower case don't matter. If the key was changed with `set-gate-key.ps1`, use the new one. |
+| Gate page: "Too many tries" | Nginx allows 10 tries a minute per address. Wait a minute. |
+| The gate page keeps coming back after the key worked | The browser blocks cookies for this site. Allow cookies for it. |
+| `-SetHeartbeatUrl`: "Not saved: the service answered HTTP 404" | The Ping URL was copied incompletely. Copy it again from the check's page. |
+| Panel: "Outside alert: Last ping failed" | The server can't reach healthchecks.io (internet or firewall). If it lasts more than 15 minutes, healthchecks.io e-mails you that the server is quiet. |
+| Panel: "Restore points" says nothing from a check yet | Part 11 isn't done, or that check hasn't run since. Look for `Panel summary:` warnings in that backup's log. |
+| `nginx-reload.log`: "nginx -t failed, so Nginx was NOT reloaded" | `nginx.conf` has a mistake (the sites keep running on the old settings). Run `.\nginx.exe -t` in `C:\nginx-1.30.2` to see it, fix it, then run the reload script by hand. |
 
 Logs: the panel's are in `pm2 logs backup-panel` (start-up, sign-ins, failed sign-ins,
 Run-now requests). The agent's are in `C:\Apps\db-backup\logs\panel-agent.log` (errors,

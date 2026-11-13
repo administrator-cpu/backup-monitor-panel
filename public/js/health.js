@@ -118,6 +118,17 @@ export function waitingCommand(state, actionId) {
   return (state.commands || []).find((c) => c.action === actionId && (c.status === 'pending' || c.status === 'sent')) || null;
 }
 
+// The first backup or check task that is running now, or null. Only one runs at a time.
+export function runningTask(data) {
+  for (const job of (data && data.jobs) || []) {
+    for (const kind of ['backup', 'check']) {
+      const t = task(job, kind);
+      if (t.state === 'Running') return t.name || `${job.label} ${kind}`;
+    }
+  }
+  return null;
+}
+
 // Can this Run-now button be pressed? Returns { enabled, reason, waiting }.
 export function actionState(state, action, now) {
   const data = state.report && state.report.data;
@@ -125,11 +136,13 @@ export function actionState(state, action, now) {
   const job = (data.jobs || []).find((j) => j.id === action.job);
   const t = task(job, action.kind);
   const waiting = waitingCommand(state, action.id);
+  const busy = runningTask(data);
   let reason = '';
   if (!((data.agent && data.agent.enabledActions) || []).includes(action.id)) reason = 'Switched off in the agent settings (DisabledActions).';
   else if (isStale(state, now)) reason = 'The agent is not reporting, so it would not collect this.';
   else if (waiting) reason = waiting.status === 'sent' ? 'The agent has it; waiting for its answer.' : 'Queued; waiting for the agent to collect it.';
   else if (t.state === 'Running') reason = 'Running now.';
+  else if (busy) reason = `Waiting until “${busy}” has finished; one task runs at a time.`;
   else if (job && !t.found) reason = 'Task not found on the server.';
   return { enabled: !reason, reason, waiting };
 }

@@ -34,6 +34,17 @@ test('full Run-now flow: queue, hand out once, record result', async () => {
   r = await call(panel, clock, 'GET', '/api/status');
   assert.equal(r.json.commands[0].status, 'started');
   assert.match(r.json.commands[0].message, /Started scheduled task/);
+  assert.equal(r.json.commands[0].requested_ip, '203.0.113.7', 'the address the button was pressed from is kept');
+  assert.equal(r.json.commands[0].requested_by, 'owner');
+});
+
+test('a cancel records who and from where', async () => {
+  const { panel, clock } = await ready();
+  const id = (await queue(panel, clock, 'run-pg-check')).json.command.id;
+  assert.equal((await cancel(panel, clock, id)).status, 200);
+  const c = panel.store.listCommands(1)[0];
+  assert.equal(c.status, 'cancelled');
+  assert.match(c.message, /owner from 203\.0\.113\.7/);
 });
 
 test('only allowlisted actions can be queued', async () => {
@@ -106,7 +117,11 @@ test('no duplicates, no queueing while running, no queueing when stale', async (
   r = await queue(panel, clock, 'run-mongo-backup');
   assert.equal(r.status, 409);
   assert.match(r.json.error, /already running/);
-  assert.equal((await queue(panel, clock, 'run-mongo-check')).status, 201, 'the check can still run');
+  for (const other of ['run-mongo-check', 'run-pg-backup', 'run-files-check']) {
+    r = await queue(panel, clock, other);
+    assert.equal(r.status, 409, `${other} waits while another task runs`);
+    assert.match(r.json.error, /"MongoDB Nightly Backup" is running/);
+  }
 
   ({ panel, clock } = await ready());
   clock.advance(11 * 60000);

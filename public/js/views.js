@@ -2,11 +2,14 @@
 // ctx: { state, now, fmt, open, busy, tab, onRun, onCancel, onTab }
 
 import { h, s, glyph, tag } from './dom.js';
-import { ago, binBytes, decBytes, plural, until } from './format.js';
+import { ago, binBytes, dayLabel, decBytes, plural, until } from './format.js';
 import {
   actionState, b2Estimate, commandsMode, diskForecast, findSize, freshness, isStale,
   jobHealth, lastGoodAt, resultText, successFile, verdict,
 } from './health.js';
+import {
+  coverageOf, driveTotals, filterPoints, historyGoal, restoreSets, SUMMARY_STALE_HOURS, summaryAgeHours,
+} from './points.js';
 
 const agoEl = (iso, now) => h('time', { datetime: iso || '', 'data-ago': iso || '' }, ago(iso, now));
 
@@ -130,11 +133,23 @@ function jobActions(job, ctx) {
     reasons.length ? h('p', { class: 'reason', id: `why-${job.id}` }, reasons.join(' ')) : null);
 }
 
+// "Times in server time (Kolkata, UTC+05:30) · Show my time" when the viewer is elsewhere.
+function zoneMeta(ctx) {
+  const z = ctx.zone;
+  if (!z || !z.differs) return `Times in ${z ? z.serverLabel : ctx.state.timeZone}`;
+  return [
+    z.mine ? `Times in your time (${z.viewerLabel})` : `Times in server time (${z.serverLabel})`,
+    ' · ',
+    h('button', { type: 'button', class: 'link-btn', 'data-focus': 'zone', onclick: z.onToggle },
+      z.mine ? 'Show server time' : `Show my time (${z.viewerLabel})`),
+  ];
+}
+
 export function backups(ctx) {
   const jobs = ctx.state.report.data.jobs || [];
   const paused = commandsMode(ctx.state).on && isStale(ctx.state, ctx.now);
   return h('section', { class: 'section', 'aria-labelledby': 'h-backups' },
-    sectionHead('Backups', `Times in ${ctx.state.timeZone.replace('_', ' ')}`, 'h-backups'),
+    sectionHead('Backups', zoneMeta(ctx), 'h-backups'),
     paused ? h('p', { class: 'note note-warn ledger-note' }, 'Run-now is paused until the agent reports again.') : null,
     h('div', { class: 'ledger', 'data-actions': String(commandsMode(ctx.state).on) }, jobs.map((j) => jobRow(j, ctx))));
 }
@@ -203,10 +218,170 @@ function backblazePanel(ctx) {
     b.lastError ? h('p', { class: 'note note-warn' }, `Last check failed: ${b.lastError}`) : null);
 }
 
+function drivePanel(ctx) {
+  const d = driveTotals(ctx.state.report.data);
+  const head = h('div', { class: 'panel-head' }, h('h3', null, 'Google Drive'));
+  if (!d) {
+    head.append(tag('idle', 'Waiting'));
+    return h('div', { class: 'panel' }, head,
+      h('p', { class: 'empty' }, 'The size of the database backups appears here after the 08:00 Postgres check has run with panel-status.ps1 (setup guide, part 11).'));
+  }
+  head.append(tag('ok', 'Included in your plan'));
+  const { space } = d;
+  const usage = space ? h('div', { class: 'usage', role: 'img', 'aria-label': `Google account ${Math.round((d.accountUsed / space.totalBytes) * 100)}% used` }, h('i')) : null;
+  if (usage) usage.firstChild.style.width = `${(Math.min(1, d.accountUsed / space.totalBytes) * 100).toFixed(1)}%`;
+  return h('div', { class: 'panel' }, head,
+    h('p', { class: 'figure' }, binBytes(d.backupBytes)),
+    h('p', { class: 'quiet' }, 'Database backups in Drive, before encryption. No extra cost: the space comes with your Google plan.'),
+    h('dl', { class: 'pairs' },
+      d.backups.map((b) => [h('dt', null, b.label), h('dd', null, `${binBytes(b.bytes)} in ${plural(b.count, 'night')}`)]),
+      space ? [h('dt', null, 'Google account'), h('dd', null, `${binBytes(d.accountUsed)} used of ${binBytes(space.totalBytes)}, ${binBytes(space.freeBytes)} free`)] : null),
+    usage,
+    space ? h('p', { class: 'quiet note' }, 'The account figure includes Gmail and Google Photos.') : null);
+}
+
 export function storage(ctx) {
   return h('section', { class: 'section', 'aria-labelledby': 'h-storage' },
     sectionHead('Storage', null, 'h-storage'),
-    h('div', { class: 'split' }, disksPanel(ctx), backblazePanel(ctx)));
+    h('div', { class: 'split' }, disksPanel(ctx), backblazePanel(ctx), drivePanel(ctx)));
+}
+
+// ---------------------------------------------------------------- restore points
+
+const PAGE_POINTS = 30;
+
+function pointWhen(p, def, ctx) {
+  return def.kind === 'drive' ? dayLabel(p.date || p.id) : ctx.fmt.time(p.time);
+}
+
+function setWhen(value, def, ctx) {
+  if (!value) return '—';
+  return def.kind === 'drive' ? dayLabel(value) : ctx.fmt.time(value);
+}
+
+function goalLine(row, ctx) {
+  const g = historyGoal(row.set, row.def.goalYears, ctx.now);
+  if (!g) return null;
+  const pct = Math.round(g.ratio * 100);
+  const text = g.met
+    ? `The history reaches back ${Math.round(g.ageDays)} days: the ${row.def.goalYears}-year goal is met.`
+    : `The history reaches back ${Math.round(g.ageDays)} of ${Math.round(g.goalDays)} days (${pct}%) of the ${row.def.goalYears}-year goal. It is met on ${ctx.fmt.date(g.metAt)} if every monthly snapshot is kept.`;
+  return h('div', { class: 'goal' },
+    h('p', { class: 'cell-label' }, `${row.def.goalYears}-year log history`),
+    meter(g.ratio, g.met ? 'ok' : 'warn', `${pct}% of the ${row.def.goalYears}-year goal`),
+    h('p', { class: 'cell-sub' }, text));
+}
+
+function pointsTable(row, ctx) {
+  const { def, set } = row;
+  const all = (set && Array.isArray(set.points)) ? set.points : [];
+  const shown = filterPoints(all, ctx.points, ctx.fmt.day);
+  const page = ctx.points.all ? shown : shown.slice(0, PAGE_POINTS);
+  const filtered = !!(ctx.points.from || ctx.points.to);
+  const dateInput = (key, label, value) => h('label', { class: 'field' }, h('span', null, label),
+    h('input', { type: 'date', value: value || '', 'data-focus': `points:${key}`, onchange: (e) => ctx.onPoints({ [key]: e.target.value }, `points:${key}`) }));
+
+  const filters = h('div', { class: 'filters' },
+    dateInput('from', 'From', ctx.points.from),
+    dateInput('to', 'To', ctx.points.to),
+    filtered ? h('button', { type: 'button', class: 'btn btn-quiet btn-sm', 'data-focus': 'points:clear', onclick: () => ctx.onPoints({ from: '', to: '' }, 'points:from') }, 'Clear') : null,
+    h('p', { class: 'quiet', 'aria-live': 'polite' }, filtered ? `${plural(shown.length, 'restore point')} of ${all.length} in this range` : `${plural(all.length, 'restore point')} listed${set && set.count > all.length ? ` (newest ${all.length} of ${set.count})` : ''}`));
+
+  if (!all.length) return [filters, h('p', { class: 'empty' }, 'No restore points in this set yet.')];
+  if (!shown.length) return [filters, h('p', { class: 'empty' }, 'No restore points in this date range.')];
+  const last = def.kind === 'restic' ? 'Uploaded' : 'Files';
+  // restic: the snapshot ID restore-files.ps1 -Snapshot takes. Drive: the folder the restore scripts read.
+  const idHead = def.kind === 'restic' ? 'Snapshot ID' : 'Folder';
+  const idOf = (p) => (def.kind === 'restic' ? p.id : `${set.location}/${p.date || p.id}`);
+  const table = h('div', { class: 'table-wrap' }, h('table', null,
+    h('thead', null, h('tr', null, ['When', idHead, 'Size', last].map((t) => h('th', { scope: 'col' }, t)))),
+    h('tbody', null, page.map((p) => h('tr', null,
+      h('td', { class: 'nowrap', 'data-label': 'When' }, pointWhen(p, def, ctx)),
+      h('td', { class: 'mono', 'data-label': idHead }, idOf(p) || '—'),
+      h('td', { class: 'nowrap', 'data-label': 'Size' }, typeof p.bytes === 'number' ? binBytes(p.bytes) : '—'),
+      h('td', { class: 'nowrap', 'data-label': last }, def.kind === 'restic'
+        ? (typeof p.added === 'number' ? binBytes(p.added) : '—')
+        : (typeof p.files === 'number' ? String(p.files) : '—')))))));
+  const more = shown.length > page.length
+    ? h('button', { type: 'button', class: 'btn btn-quiet btn-sm more', 'data-focus': 'points:all', onclick: () => ctx.onPoints({ all: true }, 'points:all') }, `Show all ${shown.length}`)
+    : null;
+  return [filters, table, more];
+}
+
+function pointsPanel(row, ctx) {
+  const { def, summary, set } = row;
+  if (!summary) {
+    return h('div', { class: 'panel' }, h('p', { class: 'empty' },
+      `Nothing from the ${def.checkAt} ${def.label === 'Server logs' || def.label === 'Files' ? 'file' : def.label} check yet. The list appears after that check has run with panel-status.ps1 (setup guide, part 11).`));
+  }
+  const check = summary.check || {};
+  const age = summaryAgeHours(summary, ctx.now);
+  const notes = [];
+  if (age !== null && age > SUMMARY_STALE_HOURS) notes.push(h('p', { class: 'note note-warn' }, `This list was last updated ${ago(summary.checkedAt, ctx.now)}; this morning's check did not refresh it.`));
+  if (set && set.fromEarlierCheck) notes.push(h('p', { class: 'note note-warn' }, 'The last check could not read this set, so the list is from an earlier check.'));
+  if (!set) notes.push(h('p', { class: 'note note-warn' }, 'The last check could not list this set.'));
+  if (check.ok === false && Array.isArray(check.problems) && check.problems.length) {
+    notes.push(h('div', { class: 'panel-note' }, h('p', { class: 'note note-warn' }, 'The morning check found problems:'),
+      h('ul', { class: 'lines' }, check.problems.map((p) => h('li', null, p)))));
+  }
+  return h('div', { class: 'panel' },
+    h('dl', { class: 'facts' },
+      h('div', null, h('dt', null, 'Stored in'), h('dd', null, set ? `${set.provider} · ${set.location}` : '—')),
+      h('div', null, h('dt', null, 'Encryption'), h('dd', null, def.encryption)),
+      h('div', null, h('dt', null, 'Kept'), h('dd', null, def.kept)),
+      h('div', null, h('dt', null, 'Restore points'), h('dd', null, set ? String(set.count) : '—')),
+      h('div', null, h('dt', null, 'Oldest'), h('dd', null, set ? setWhen(set.oldest, def, ctx) : '—')),
+      h('div', null, h('dt', null, 'Newest'), h('dd', null, set ? setWhen(set.newest, def, ctx) : '—')),
+      h('div', null, h('dt', null, def.kind === 'restic' ? 'In Backblaze' : 'Total size'), h('dd', null, set && typeof set.storedBytes === 'number' ? binBytes(set.storedBytes) : '—')),
+      h('div', null, h('dt', null, 'Morning check'), h('dd', null, check.ok === false ? 'Found problems' : 'OK', h('span', { class: 'quiet' }, ' · ', agoEl(summary.checkedAt, ctx.now))))),
+    def.goalYears && set ? goalLine(row, ctx) : null,
+    notes,
+    pointsTable(row, ctx));
+}
+
+function coveragePanel(rows, ctx) {
+  const blocks = rows.filter((r) => r.summary).map((r) => {
+    const c = coverageOf(r);
+    const list = c.items.map(String);
+    const head = h('p', { class: 'cell-label' }, `${r.def.label}: ${plural(list.length, c.what === 'databases' ? 'database' : 'folder')}`);
+    const top = list.slice(0, 8);
+    const rest = list.slice(8);
+    return h('div', { class: 'cover' }, head,
+      list.length ? h('ul', { class: 'lines' }, top.map((x) => h('li', null, x))) : h('p', { class: 'empty' }, '—'),
+      rest.length ? details(ctx, `cover:${r.def.id}`, `${rest.length} more`, h('ul', { class: 'lines fold-body' }, rest.map((x) => h('li', null, x)))) : null,
+      c.missing.length ? h('p', { class: 'note note-warn' }, `No dump in the newest backup: ${c.missing.join(', ')}`) : null);
+  });
+  if (!blocks.length) return null;
+  return h('div', { class: 'panel panel-cover' },
+    h('div', { class: 'panel-head' }, h('h3', null, 'What is backed up'), h('p', { class: 'quiet' }, 'From the newest restore point of each set. Anything not listed is not backed up.')),
+    h('div', { class: 'cover-grid' }, blocks));
+}
+
+export function restorePoints(ctx) {
+  const rows = restoreSets(ctx.state.report.data);
+  const any = rows.some((r) => r.summary);
+  const headEl = sectionHead('Restore points', any ? 'Listed by the morning checks · read-only; restores are done on the server' : null, 'h-points');
+  if (!any) {
+    return h('section', { class: 'section', 'aria-labelledby': 'h-points' }, headEl,
+      h('p', { class: 'empty panel' }, 'The list of backups you can restore from appears here after the morning checks have run with panel-status.ps1 (setup guide, part 11).'));
+  }
+  const sel = rows.find((r) => r.def.id === ctx.points.set) || rows[0];
+  const ids = rows.map((r) => r.def.id);
+  const list = h('div', { role: 'tablist', 'aria-label': 'Backup sets', class: 'tabs' },
+    rows.map((r) => h('button', {
+      type: 'button', role: 'tab', id: `ptab-${r.def.id}`, 'aria-controls': 'points-panel', 'aria-selected': String(r === sel),
+      tabindex: r === sel ? '0' : '-1', 'data-focus': `ptab:${r.def.id}`, onclick: () => ctx.onPoints({ set: r.def.id }),
+    }, r.def.label, r.set ? h('span', { class: 'tab-count' }, String(r.set.count)) : null)));
+  list.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    const i = ids.indexOf(sel.def.id);
+    const next = ids[(i + (e.key === 'ArrowRight' ? 1 : ids.length - 1)) % ids.length];
+    ctx.onPoints({ set: next }, `ptab:${next}`);
+  });
+  return h('section', { class: 'section', 'aria-labelledby': 'h-points' }, headEl,
+    list,
+    h('div', { role: 'tabpanel', id: 'points-panel', 'aria-labelledby': `ptab-${sel.def.id}`, class: 'tabpanel' }, pointsPanel(sel, ctx)),
+    coveragePanel(rows, ctx));
 }
 
 // ---------------------------------------------------------------- agent
@@ -219,6 +394,10 @@ export function agent(ctx) {
   const mode = commandsMode(state);
   const issues = a.collectErrors || [];
   const events = state.events || [];
+  const hb = a.heartbeat || null;
+  const hbText = !hb || !hb.enabled
+    ? 'Not set up'
+    : hb.lastError ? 'Last ping failed' : hb.lastPingAt ? ['On · pinged ', agoEl(hb.lastPingAt, now)] : 'On, first ping soon';
   return h('section', { class: 'section', 'aria-labelledby': 'h-agent' },
     sectionHead('Server agent', null, 'h-agent'),
     h('div', { class: 'panel panel-row' },
@@ -226,8 +405,11 @@ export function agent(ctx) {
         h('div', null, h('dt', null, 'Server'), h('dd', null, data.host || '—')),
         h('div', null, h('dt', null, 'Last report'), h('dd', null, stamp(state.report.receivedAt, ctx))),
         h('div', null, h('dt', null, 'Agent'), h('dd', null, `${data.agentVersion || '?'}, PowerShell ${a.psVersion || '?'}`)),
-        h('div', null, h('dt', null, 'Run-now'), h('dd', null, mode.on ? `On, ${(a.enabledActions || []).length} of 6 actions` : 'Off'))),
+        h('div', null, h('dt', null, 'Run-now'), h('dd', null, mode.on ? `On, ${(a.enabledActions || []).length} of 6 actions` : 'Off')),
+        h('div', null, h('dt', null, 'Outside alert'), h('dd', null, hbText))),
       stale ? tag('bad', 'Not reporting') : issues.length ? tag('warn', 'Partial report') : tag('ok', 'Reporting')),
+    hb && hb.enabled && hb.lastError ? h('p', { class: 'note note-warn' }, `The outside alert service could not be reached: ${hb.lastError}. If this goes on, it will e-mail you that the server is quiet.`) : null,
+    !hb || !hb.enabled ? h('p', { class: 'note quiet' }, 'Nobody is told when this server goes quiet until the outside alert is set up (setup guide, part 10).') : null,
     issues.length ? h('div', { class: 'panel panel-note' }, h('p', null, 'The agent could not read everything:'), h('ul', { class: 'lines' }, issues.map((e) => h('li', null, e)))) : null,
     events.length ? details(ctx, 'events', `${plural(events.length, 'earlier agent error')} while the panel was unreachable`,
       h('ul', { class: 'lines fold-body' }, events.map((e) => h('li', null, `${ctx.fmt.time(e.at)}  ${e.message}`)))) : null);
@@ -252,7 +434,7 @@ export function history(ctx) {
     body = h('div', { class: 'table-wrap' }, h('table', null,
       h('thead', null, h('tr', null, ['Requested', 'Task', 'Status', 'Result', h('span', { class: 'visually-hidden' }, 'Actions')].map((t) => h('th', { scope: 'col' }, t)))),
       h('tbody', null, rows.map((c) => h('tr', null,
-        h('td', { class: 'nowrap', 'data-label': 'Requested' }, ctx.fmt.time(c.requested_at), h('span', { class: 'cell-sub' }, c.requested_by)),
+        h('td', { class: 'nowrap', 'data-label': 'Requested' }, ctx.fmt.time(c.requested_at), h('span', { class: 'cell-sub' }, c.requested_ip ? `${c.requested_by} · ${c.requested_ip}` : c.requested_by)),
         h('td', { 'data-label': 'Task' }, tasks[c.action] || c.action),
         h('td', { 'data-label': 'Status' }, tag(COMMAND_LEVEL[c.status] || 'idle', COMMAND_WORD[c.status] || c.status)),
         h('td', { 'data-label': 'Result' }, c.message || (c.status === 'pending' ? 'Waiting for the agent to collect it.' : c.status === 'sent' ? 'The agent has it.' : '')),

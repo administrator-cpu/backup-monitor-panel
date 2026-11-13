@@ -160,6 +160,8 @@ button { font: inherit; color: inherit; }
 .btn-quiet { background: transparent; color: var(--ink); border-color: var(--rule); font-weight: 400; }
 .btn-quiet:hover:not(:disabled) { filter: none; background: var(--sunk); }
 .btn-sm { min-height: 30px; padding: 3px 10px; font-size: 0.85rem; }
+.link-btn { border: 0; padding: 0; background: none; color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; font-size: inherit; }
+.link-btn:hover { text-decoration-thickness: 2px; }
 
 .glyph { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .tag { display: inline-flex; align-items: center; gap: 5px; font-size: 0.8rem; font-weight: 600; padding: 2px 8px 2px 5px; border-radius: 4px; white-space: nowrap; }
@@ -280,6 +282,26 @@ button { font: inherit; color: inherit; }
 .spark-fill { fill: var(--accent); opacity: 0.1; }
 .figure { font-size: 1.9rem; font-weight: 600; line-height: 1.1; letter-spacing: -0.02em; margin-bottom: 4px; }
 .panel .pairs { margin-top: 12px; }
+
+/* ------------------------------------------------------------ restore points */
+.tab-count { margin-left: 6px; padding: 0 6px; border-radius: 9px; background: var(--rule); color: var(--ink-2); font-size: 0.75rem; font-weight: 600; }
+.tabs [aria-selected='true'] .tab-count { background: var(--run-tint); color: var(--run); }
+#points-panel > .panel { display: grid; gap: 14px; }
+#points-panel .facts { gap: 10px 28px; }
+#points-panel .facts dd { font-weight: 400; }
+.goal { max-width: 560px; }
+.goal .meter { max-width: 100%; height: 6px; }
+.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; }
+.filters .quiet { font-size: 0.85rem; flex: 1 1 200px; padding-bottom: 6px; }
+.field { display: grid; gap: 2px; font-size: 0.78rem; color: var(--ink-2); }
+.field input { font: inherit; font-size: 0.875rem; color: var(--ink); background: var(--bg); border: 1px solid var(--rule); border-radius: var(--radius); padding: 4px 8px; min-height: 32px; }
+.field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
+td.mono { font-family: var(--mono); font-size: 0.8rem; }
+.more { justify-self: start; }
+.panel-cover { margin-top: 16px; }
+.cover-grid { display: grid; gap: 16px 24px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); }
+.cover { min-width: 0; }
+.cover .lines { list-style: none; padding: 0; }
 
 /* ------------------------------------------------------------ history table */
 .table-wrap { position: relative; overflow-x: auto; background: var(--panel); border: 1px solid var(--rule); border-radius: var(--radius); }
