@@ -27,6 +27,9 @@ anything.
 | `public/js/health.js` | Every judgement the page makes (job status, summary sentence, button availability, disk forecast). Pure, so it's unit-tested. |
 | `public/fonts/` | IBM Plex Sans and Mono (SIL Open Font License, see `OFL.txt`), served locally. |
 | `public/js/points.js` | Restore points, coverage and Google Drive figures from the checks' summary files. Pure, unit-tested. |
+| `public/js/history.js` | The 30-day run grid, 24-hour counts, error kinds and log lines as events. Pure, unit-tested. |
+| `public/js/reminders.js` | Practice-restore and key-change reminders, Backblaze caps; also validates changes on the server. |
+| `deploy/rotate-nginx-logs.ps1` | Weekly task: rename big Nginx logs, `nginx -s reopen`, pack the old ones to `.gz` (checked before the copy is removed). |
 | `public/gate/` | The gate page in front of the sign-in. Served by Nginx itself. |
 | `panel.config.example.json` | Panel settings template. On the server it is copied to `panel.config.json` (git-ignored, so `git pull` never touches your settings). |
 | `deploy/nginx-backup-panel.conf` | Nginx template: HTTPS, gate page, agent API blocked, sign-in and gate rate limits. |

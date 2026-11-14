@@ -83,7 +83,10 @@ function Invoke-Restic(`$a) {
     if (`$script:Set -eq 'logs') { `$paths = '["F:\\syslog-data"]' } else { `$paths = '["C:\\Apps\\one","C:\\Site"]' }
     `$s1 = '{"time":"' + `$t2 + '","id":"aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888","short_id":"aaaa1111","paths":' + `$paths + ',"summary":{"data_added":2048,"data_added_packed":1024,"total_files_processed":10,"total_bytes_processed":999999}}'
     `$s2 = '{"time":"' + `$t1 + '","id":"1234abcd5678ef901234abcd5678ef901234abcd5678ef901234abcd5678ef90","short_id":"1234abcd","paths":' + `$paths + ',"summary":{"data_added":4096,"total_files_processed":11,"total_bytes_processed":1000123}}'
-    return (New-FakeResult 0 @('[' + `$s1 + ',' + `$s2 + ']'))
+    `$list = @('[' + `$s1 + ',' + `$s2 + ']')
+    # Slow Backblaze: restic prints retry lines next to the JSON (this broke v1.1 on 2026-11-12).
+    if (Test-Path (Join-Path `$PSScriptRoot 'slow-b2.flag')) { `$list = @('Load(<snapshot/aaaa1111>, 0, 0) returned error, retrying after 552.330144ms: Get "https://f003.backblazeb2.com/...": EOF') + `$list }
+    return (New-FakeResult 0 `$list)
 }
 "@
 
@@ -182,6 +185,17 @@ try {
     Assert ($logs.storedBytes -eq 5000000 -and $logs.provider -eq 'Backblaze B2') 'the stored size in Backblaze is kept per set'
     Assert ((@($logs.paths) -join ',') -eq 'F:\syslog-data' -and @($files.paths).Count -eq 2) 'the folders in the newest snapshot are listed'
     Assert ($logs.oldest -lt $logs.newest) 'oldest and newest restore points are known'
+    Assert ($logs.listMs -ge 0 -and $null -ne $logs.listMs -and $logs.retries -eq 0) 'the time the listing took is recorded'
+
+    Write-Host 'files-backup-check.ps1 when Backblaze is slow (restic retries)'
+    New-Item -ItemType File -Path (Join-Path $tmp 'slow-b2.flag') | Out-Null
+    $code = Invoke-Check 'files-backup-check.ps1'
+    $st = Read-Status 'files-snapshots.json'
+    $log = Get-Content -LiteralPath (Join-Path $tmp 'logs\test.log') -Raw
+    Remove-Item -LiteralPath (Join-Path $tmp 'slow-b2.flag')
+    Assert ($code -eq 0 -and (& $mails).Count -eq 0) 'retry lines no longer make the check fail (was "Invalid JSON primitive: Load")'
+    Assert ($log -match 'Backblaze was slow: restic retried 1 time' -and $log -notmatch 'CHECK FAILED') 'the retries are logged as a warning instead'
+    Assert (@($st.sets | Where-Object { $_.id -eq 'logs' })[0].retries -eq 1) 'the panel learns about the retries'
 
     # ------------------------------------------------------------------
     Write-Host 'What the agent makes of these files'

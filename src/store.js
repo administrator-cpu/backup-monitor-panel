@@ -11,7 +11,7 @@ export const iso = (ms) => new Date(ms).toISOString();
 
 const DAY = 86400000;
 const ACTIVE = new Set(['pending', 'sent']);
-const empty = () => ({ version: 1, latest: null, metrics: {}, commands: [], events: [] });
+const empty = () => ({ version: 1, latest: null, metrics: {}, commands: [], events: [], runs: [], notes: {} });
 
 function load(file, log) {
   if (!file || !existsSync(file)) return empty();
@@ -148,6 +148,42 @@ export function openStore(file, { log = console.log } = {}) {
       save();
     },
 
+    // Finished runs of the six tasks, one row per task run (job, kind, runAt, result).
+    // A run seen again keeps its row; only a changed result is written.
+    recordRuns(runs, nowIso) {
+      let changed = false;
+      for (const r of runs) {
+        const old = data.runs.find((x) => x.job === r.job && x.kind === r.kind && x.runAt === r.runAt);
+        if (!old) {
+          data.runs.push({ ...r, seenAt: nowIso });
+          changed = true;
+        } else if (old.result !== r.result) {
+          old.result = r.result;
+          changed = true;
+        }
+      }
+      if (changed) save();
+      return changed;
+    },
+
+    listRuns(sinceIso) {
+      return data.runs.filter((r) => r.runAt >= sinceIso).sort((a, b) => a.runAt.localeCompare(b.runAt)).map((r) => ({ ...r }));
+    },
+
+    firstRunSeenAt() {
+      return data.runs.reduce((min, r) => (!min || r.seenAt < min ? r.seenAt : min), null);
+    },
+
+    // The owner's reminders (practice restores, key changes, Backblaze caps).
+    getNotes() {
+      return JSON.parse(JSON.stringify(data.notes || {}));
+    },
+
+    setNotes(notes) {
+      data.notes = JSON.parse(JSON.stringify(notes));
+      save();
+    },
+
     listEvents(kind, limit) {
       return data.events
         .filter((e) => e.kind === kind)
@@ -162,6 +198,7 @@ export function openStore(file, { log = console.log } = {}) {
       const keepDays = iso(nowMs - 3 * 365 * DAY).slice(0, 10);
       data.commands = data.commands.filter((c) => c.requested_at >= keepCommands);
       data.events = data.events.filter((e) => e.at >= keepEvents);
+      data.runs = data.runs.filter((r) => r.runAt >= keepCommands);
       for (const day of Object.keys(data.metrics)) if (day < keepDays) delete data.metrics[day];
       save();
     },

@@ -10,6 +10,23 @@ import {
 import {
   coverageOf, driveTotals, filterPoints, historyGoal, restoreSets, SUMMARY_STALE_HOURS, summaryAgeHours,
 } from './points.js';
+import { dayCounts, errorKind, lastDays, logEvents, runGrid } from './history.js';
+import { capsInfo, daysBetween, KEY_MONTHS, keyRows, practiceRows } from './reminders.js';
+
+const KIND_LEVEL = { auth: 'bad', unreachable: 'warn', server: 'warn', backup: 'bad', other: 'warn' };
+
+// An error message with a tag saying what kind of problem it is.
+function problemLine(text) {
+  const k = errorKind(text);
+  return h('li', { class: 'problem' }, tag(KIND_LEVEL[k.kind], k.label), h('span', null, text));
+}
+
+const seconds = (ms) => (typeof ms === 'number' ? `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s` : '—');
+
+// Daily values from the metrics rows, oldest first.
+function metricSeries(ctx, pick) {
+  return (ctx.state.metrics || []).map(pick).filter((v) => typeof v === 'number');
+}
 
 const agoEl = (iso, now) => h('time', { datetime: iso || '', 'data-ago': iso || '' }, ago(iso, now));
 
@@ -46,6 +63,17 @@ function sparkline(values, label, top) {
 
 // ---------------------------------------------------------------- summary
 
+function countsLine(ctx) {
+  if (!ctx.state.report || !ctx.state.report.data) return null;
+  const c = dayCounts(ctx.state, ctx.now);
+  const item = (n, text, level) => h('li', { 'data-level': level }, h('strong', null, String(n)), ` ${text}`);
+  return h('ul', { class: 'counts', 'aria-label': 'Tasks in the last 24 hours' },
+    item(c.tasks, 'tasks watched', 'idle'),
+    item(c.running, 'running now', c.running ? 'run' : 'idle'),
+    item(c.ok, 'finished OK in 24 h', c.ok ? 'ok' : 'idle'),
+    item(c.failed, 'failed in 24 h', c.failed ? 'bad' : 'idle'));
+}
+
 export function summary(ctx) {
   const v = verdict(ctx.state, ctx.now, ctx.fmt);
   return h('section', { class: `summary summary-${v.level}`, 'aria-label': 'Summary' },
@@ -54,7 +82,37 @@ export function summary(ctx) {
       h('p', { class: 'headline' }, v.headline),
       v.detail.length > 1
         ? h('ul', { class: 'summary-list' }, v.detail.map((d) => h('li', null, d)))
-        : v.detail.map((d) => h('p', { class: 'summary-detail' }, d))));
+        : v.detail.map((d) => h('p', { class: 'summary-detail' }, d)),
+      countsLine(ctx)));
+}
+
+// ---------------------------------------------------------------- run history
+
+const RUN_WORD = { ok: 'OK', bad: 'Failed', none: 'No run', later: 'Not run yet today', unknown: 'Before the panel recorded' };
+
+export function runHistory(ctx) {
+  const today = ctx.fmt.day(new Date(ctx.now).toISOString());
+  const days = lastDays(today, 30);
+  const since = ctx.state.historySince ? ctx.fmt.day(ctx.state.historySince) : today;
+  const rows = runGrid(ctx.state.runs || [], days, ctx.fmt.day, since);
+  const dayName = (d) => ctx.fmt.date(Date.parse(`${d}T12:00:00Z`));
+  const grid = h('div', { class: 'runs' },
+    rows.map((r) => {
+      const label = `${r.label}: ${r.counts.ok} OK, ${r.counts.bad} failed, ${r.counts.none} days without a run`;
+      return h('div', { class: 'runs-row' },
+        h('span', { class: 'runs-label' }, r.label),
+        h('span', { class: 'runs-cells', role: 'img', 'aria-label': label },
+          r.cells.map((c) => {
+            const detail = c.runs.map((x) => `${ctx.fmt.clock(x.runAt)} ${resultText(x.result)}`).join(', ');
+            return h('i', { 'data-level': c.level, title: `${dayName(c.day)}: ${detail || RUN_WORD[c.level]}` });
+          })));
+    }));
+  const legend = h('ul', { class: 'runs-legend', 'aria-hidden': 'true' },
+    ['ok', 'bad', 'none', 'unknown'].map((l) => h('li', null, h('i', { 'data-level': l }), RUN_WORD[l])));
+  return h('section', { class: 'section', 'aria-labelledby': 'h-runs' },
+    sectionHead('Last 30 days', ctx.state.historySince ? `Recorded since ${ctx.fmt.date(Date.parse(ctx.state.historySince))} · point at a square for details` : 'Fills in as the tasks run', 'h-runs'),
+    h('div', { class: 'panel' }, grid,
+      h('div', { class: 'runs-foot' }, h('span', { class: 'quiet' }, dayName(days[0])), legend, h('span', { class: 'quiet' }, 'Today'))));
 }
 
 // ---------------------------------------------------------------- backups
@@ -205,6 +263,7 @@ function backblazePanel(ctx) {
   const est = b2Estimate(b);
   head.append(b.lastError ? tag('warn', 'Last check failed') : est ? tag('ok', 'Up to date') : tag('idle', 'Waiting'));
   const series = (ctx.state.metrics || []).filter((m) => m.b2 && typeof m.b2.totalBytes === 'number').map((m) => m.b2.totalBytes);
+  const listTimes = metricSeries(ctx, (m) => m.b2 && m.b2.listMs);
   return h('div', { class: 'panel' }, head,
     h('p', { class: 'figure' }, est ? decBytes(b.totalBytes) : '—'),
     h('p', { class: 'quiet' }, est
@@ -213,9 +272,41 @@ function backblazePanel(ctx) {
     h('dl', { class: 'pairs' },
       (b.prefixes || []).map((p) => [h('dt', null, String(p.prefix || '').replace(/\/$/, '')),
         h('dd', null, `${decBytes(p.bytes)} in ${plural(p.files, 'file')}${p.complete === false ? ' (listing cut short)' : ''}`)]),
-      h('dt', null, 'Checked'), h('dd', null, stamp(b.checkedAt, ctx))),
+      h('dt', null, 'Checked'), h('dd', null, stamp(b.checkedAt, ctx)),
+      typeof b.listMs === 'number' ? [h('dt', null, 'Listing took'), h('dd', null, seconds(b.listMs))] : null),
     series.length >= 2 ? h('div', { class: 'disk-trend' }, sparkline(series, `Bucket size, last ${series.length} days`), h('p', null, `Bucket size over ${series.length} days.`)) : null,
-    b.lastError ? h('p', { class: 'note note-warn' }, `Last check failed: ${b.lastError}`) : null);
+    listTimes.length >= 2 ? h('div', { class: 'disk-trend' }, sparkline(listTimes, `Listing time, last ${listTimes.length} days`), h('p', null, `Listing time over ${listTimes.length} days.`)) : null,
+    b.lastError ? h('ul', { class: 'lines problems' }, problemLine(`Last check failed: ${b.lastError}`)) : null,
+    capsBlock(ctx, est));
+}
+
+// Backblaze caps (set on the Backblaze website), kept here as a note next to the estimate.
+function capsBlock(ctx, est) {
+  const c = capsInfo(ctx.state.notes, est ? est.perMonth : null);
+  const money = (v) => (typeof v === 'number' ? `$${v.toFixed(2)}` : 'not noted');
+  const summaryText = c.storage === null && c.download === null
+    ? 'Caps set at Backblaze: not noted yet'
+    : `Caps set at Backblaze: storage ${money(c.storage)} a day, download ${money(c.download)} a day`;
+  const input = (id, label, value) => h('label', { class: 'field' }, h('span', null, label),
+    h('input', { type: 'number', min: '0', max: '1000', step: '0.01', inputmode: 'decimal', id, value: typeof value === 'number' ? String(value) : '' }));
+  const form = h('form', { class: 'filters', novalidate: true },
+    input('cap-storage', 'Storage, $ a day', c.storage),
+    input('cap-download', 'Download, $ a day', c.download),
+    h('button', { type: 'submit', class: 'btn btn-sm', 'data-focus': 'caps:save' }, 'Save'));
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const read = (id) => {
+      const v = form.querySelector(`#${id}`).value.trim();
+      return v === '' ? null : Number(v);
+    };
+    ctx.onNote({ section: 'caps', storagePerDay: read('cap-storage'), downloadPerDay: read('cap-download') }, 'caps:save');
+  });
+  return details(ctx, 'caps', summaryText,
+    h('div', { class: 'fold-body' },
+      c.ratio !== null ? h('p', { class: c.level === 'warn' ? 'note note-warn' : 'note quiet' },
+        `Storage now costs about $${c.perDay.toFixed(2)} a day: ${Math.round(c.ratio * 100)}% of the cap.${c.level === 'warn' ? ' Raise the cap at Backblaze before uploads stop.' : ''}`) : null,
+      h('p', { class: 'quiet note' }, 'Copy the numbers from Backblaze, Caps & Alerts. A restore downloads data and counts against the download cap.'),
+      form));
 }
 
 function drivePanel(ctx) {
@@ -237,7 +328,11 @@ function drivePanel(ctx) {
       d.backups.map((b) => [h('dt', null, b.label), h('dd', null, `${binBytes(b.bytes)} in ${plural(b.count, 'night')}`)]),
       space ? [h('dt', null, 'Google account'), h('dd', null, `${binBytes(d.accountUsed)} used of ${binBytes(space.totalBytes)}, ${binBytes(space.freeBytes)} free`)] : null),
     usage,
-    space ? h('p', { class: 'quiet note' }, 'The account figure includes Gmail and Google Photos.') : null);
+    space ? h('p', { class: 'quiet note' }, 'The account figure includes Gmail and Google Photos.') : null,
+    (() => {
+      const series = metricSeries(ctx, (m) => m.drive && m.drive.backupBytes);
+      return series.length >= 2 ? h('div', { class: 'disk-trend' }, sparkline(series, `Backups in Drive, last ${series.length} days`), h('p', null, `Backups in Drive over ${series.length} days.`)) : null;
+    })());
 }
 
 export function storage(ctx) {
@@ -322,7 +417,14 @@ function pointsPanel(row, ctx) {
   if (!set) notes.push(h('p', { class: 'note note-warn' }, 'The last check could not list this set.'));
   if (check.ok === false && Array.isArray(check.problems) && check.problems.length) {
     notes.push(h('div', { class: 'panel-note' }, h('p', { class: 'note note-warn' }, 'The morning check found problems:'),
-      h('ul', { class: 'lines' }, check.problems.map((p) => h('li', null, p)))));
+      h('ul', { class: 'lines problems' }, check.problems.map((p) => problemLine(p)))));
+  }
+  if (Array.isArray(summary.notes) && summary.notes.length) {
+    notes.push(h('div', { class: 'panel-note' }, h('p', { class: 'note note-warn' }, 'Could not list everything this time:'),
+      h('ul', { class: 'lines problems' }, summary.notes.map((p) => problemLine(String(p))))));
+  }
+  if (set && set.retries > 0) {
+    notes.push(h('p', { class: 'note note-warn' }, `Backblaze was slow this morning: restic had to retry ${plural(set.retries, 'time')}.`));
   }
   return h('div', { class: 'panel' },
     h('dl', { class: 'facts' },
@@ -333,10 +435,32 @@ function pointsPanel(row, ctx) {
       h('div', null, h('dt', null, 'Oldest'), h('dd', null, set ? setWhen(set.oldest, def, ctx) : '—')),
       h('div', null, h('dt', null, 'Newest'), h('dd', null, set ? setWhen(set.newest, def, ctx) : '—')),
       h('div', null, h('dt', null, def.kind === 'restic' ? 'In Backblaze' : 'Total size'), h('dd', null, set && typeof set.storedBytes === 'number' ? binBytes(set.storedBytes) : '—')),
-      h('div', null, h('dt', null, 'Morning check'), h('dd', null, check.ok === false ? 'Found problems' : 'OK', h('span', { class: 'quiet' }, ' · ', agoEl(summary.checkedAt, ctx.now))))),
+      h('div', null, h('dt', null, 'Morning check'), h('dd', null, check.ok === false ? 'Found problems' : 'OK', h('span', { class: 'quiet' }, ' · ', agoEl(summary.checkedAt, ctx.now)))),
+      h('div', null, h('dt', null, 'Listing took'), h('dd', null, set ? seconds(set.listMs) : '—'))),
     def.goalYears && set ? goalLine(row, ctx) : null,
+    set ? trendsLine(row, ctx) : null,
     notes,
     pointsTable(row, ctx));
+}
+
+// Per night: uploaded (restic) or dump size (Drive), and how long the listing took.
+function trendsLine(row, ctx) {
+  const { def, set } = row;
+  const pts = (Array.isArray(set.points) ? set.points : []).slice(0, 30).reverse();
+  const values = pts.map((p) => (def.kind === 'restic' ? p.added : p.bytes)).filter((v) => typeof v === 'number');
+  const times = metricSeries(ctx, (m) => m.reads && m.reads[def.id] && m.reads[def.id].ms);
+  const parts = [];
+  if (values.length >= 2) {
+    const avg = values.reduce((a, b) => a + b, 0) / values.length;
+    const what = def.kind === 'restic' ? 'Uploaded' : 'Dump size';
+    parts.push(h('div', { class: 'disk-trend' }, sparkline(values, `${what} per night, last ${values.length}`),
+      h('p', null, `${what} per night: last ${binBytes(values[values.length - 1])}, average ${binBytes(avg)} over ${values.length} nights.`)));
+  }
+  if (times.length >= 2) {
+    parts.push(h('div', { class: 'disk-trend' }, sparkline(times, `Listing time, last ${times.length} days`),
+      h('p', null, `Listing time over ${times.length} days (longer means Backblaze or Drive was slow).`)));
+  }
+  return parts.length ? h('div', { class: 'trends' }, parts) : null;
 }
 
 function coveragePanel(rows, ctx) {
@@ -382,6 +506,67 @@ export function restorePoints(ctx) {
     list,
     h('div', { role: 'tabpanel', id: 'points-panel', 'aria-labelledby': `ptab-${sel.def.id}`, class: 'tabpanel' }, pointsPanel(sel, ctx)),
     coveragePanel(rows, ctx));
+}
+
+// ---------------------------------------------------------------- reminders
+
+const REMINDER_TAG = {
+  ok: (row) => tag('ok', row.months ? 'Up to date' : 'Done'),
+  due: () => tag('warn', 'Due'),
+  never: () => tag('idle', 'Not noted'),
+};
+
+function dayText(day, today) {
+  if (!day) return '—';
+  const n = daysBetween(day, today);
+  return [dayLabel(day), h('span', { class: 'quiet' }, n <= 0 ? ' · today' : ` · ${plural(n, 'day')} ago`)];
+}
+
+function dateInput(ctx, key, value, today, label, onPick) {
+  return h('input', {
+    type: 'date', class: 'date-sm', value: value || '', max: today, 'aria-label': label, 'data-focus': key,
+    onchange: (e) => { if (e.target.value) onPick(e.target.value); },
+  });
+}
+
+export function reminders(ctx) {
+  const today = ctx.fmt.day(new Date(ctx.now).toISOString());
+  const data = ctx.state.report && ctx.state.report.data;
+  const auto = { panel: ctx.state.loginSetAt || null, agent: (data && data.agent && data.agent.tokenSetAt) || null };
+  const practice = practiceRows(ctx.state.notes, today);
+  const keys = keyRows(ctx.state.notes, auto, today);
+
+  const practicePanel = h('div', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h3', null, 'Practice restores'), h('p', { class: 'quiet' }, 'Once a month each')),
+    h('div', { class: 'remind-list' }, practice.map((r) => h('div', { class: 'remind' },
+      h('div', { class: 'remind-main' },
+        h('p', { class: 'remind-name' }, r.label, ' ', REMINDER_TAG[r.level](r)),
+        h('p', { class: 'cell-sub' }, r.last ? ['Last: ', dayText(r.last, today)] : 'No practice restore noted yet.'),
+        h('p', { class: 'cell-sub' }, `On the server: ${r.how}.`)),
+      h('div', { class: 'remind-actions' },
+        h('button', { type: 'button', class: 'btn btn-quiet btn-sm', 'data-focus': `practice:${r.id}:today`, onclick: () => ctx.onNote({ section: 'practice', id: r.id, date: today }, `practice:${r.id}:today`) }, 'Done today'),
+        dateInput(ctx, `practice:${r.id}:date`, r.last, today, `Date of the last ${r.label} practice restore`, (d) => ctx.onNote({ section: 'practice', id: r.id, date: d }, `practice:${r.id}:date`)))))),
+    h('p', { class: 'quiet note' }, 'Always restore into a new name or folder; the restore scripts never overwrite the originals.'));
+
+  const keysPanel = h('div', { class: 'panel' },
+    h('div', { class: 'panel-head' }, h('h3', null, 'Keys and passwords'), h('p', { class: 'quiet' }, 'When each was last changed')),
+    h('div', { class: 'remind-list' }, keys.map((r) => h('div', { class: 'remind' },
+      h('div', { class: 'remind-main' },
+        h('p', { class: 'remind-name' }, r.label, ' ', REMINDER_TAG[r.level](r)),
+        h('p', { class: 'cell-sub' }, r.last ? ['Changed: ', dayText(r.last, today), r.manual ? '' : h('span', { class: 'quiet' }, ' (read from the server)')] : r.manual ? 'Not noted yet.' : 'Not known yet.'),
+        r.dueOn ? h('p', { class: 'cell-sub' }, `Next change due ${dayLabel(r.dueOn)}`) : null),
+      h('div', { class: 'remind-actions' },
+        r.manual ? h('button', { type: 'button', class: 'btn btn-quiet btn-sm', 'data-focus': `key:${r.id}:today`, onclick: () => ctx.onNote({ section: 'keys', id: r.id, date: today }, `key:${r.id}:today`) }, 'Changed today') : null,
+        r.manual ? dateInput(ctx, `key:${r.id}:date`, r.last, today, `Date ${r.label} was last changed`, (d) => ctx.onNote({ section: 'keys', id: r.id, date: d }, `key:${r.id}:date`)) : null,
+        r.manual ? h('select', {
+          class: 'date-sm', 'aria-label': `How often to change ${r.label}`, 'data-focus': `key:${r.id}:months`,
+          onchange: (e) => ctx.onNote({ section: 'keys', id: r.id, months: Number(e.target.value) }, `key:${r.id}:months`),
+        }, KEY_MONTHS.map((m) => h('option', { value: String(m), selected: m === r.months }, `every ${m} months`))) : null)))),
+    h('p', { class: 'quiet note' }, 'Only dates are kept here, never the keys themselves.'));
+
+  return h('section', { class: 'section', 'aria-labelledby': 'h-remind' },
+    sectionHead('Reminders', 'Dates you note here; the panel turns them into due dates', 'h-remind'),
+    h('div', { class: 'split' }, practicePanel, keysPanel));
 }
 
 // ---------------------------------------------------------------- agent
@@ -472,8 +657,32 @@ function statusList(ctx) {
     h('pre', { class: 'raw' }, f.error ? f.error : JSON.stringify(f.content, null, 2))));
 }
 
+const LEVEL_TAG = { ERROR: 'bad', WARN: 'warn', INFO: 'idle' };
+const LEVEL_FILTERS = [['INFO', 'All lines'], ['WARN', 'Warnings and errors'], ['ERROR', 'Errors only']];
+
+// Every log's last lines as one list, newest first, with a severity filter.
+function eventsList(ctx) {
+  const level = ctx.logLevel || 'INFO';
+  const events = logEvents(ctx.state.report.data.logs || [], level);
+  const filters = h('div', { class: 'seg', role: 'group', 'aria-label': 'Show' },
+    LEVEL_FILTERS.map(([id, label]) => h('button', {
+      type: 'button', class: 'seg-btn', 'aria-pressed': String(level === id), 'data-focus': `level:${id}`,
+      onclick: () => ctx.onLogLevel(id),
+    }, label)));
+  const body = events.length
+    ? h('div', { class: 'table-wrap' }, h('table', null,
+      h('thead', null, h('tr', null, ['Time', 'Level', 'Log', 'Message'].map((t) => h('th', { scope: 'col' }, t)))),
+      h('tbody', null, events.slice(0, 200).map((e) => h('tr', null,
+        h('td', { class: 'nowrap mono', 'data-label': 'Time' }, e.time || '—'),
+        h('td', { 'data-label': 'Level' }, tag(LEVEL_TAG[e.level], e.level)),
+        h('td', { class: 'nowrap', 'data-label': 'Log' }, e.source),
+        h('td', { class: 'mono msg', 'data-label': 'Message' }, e.message))))))
+    : h('p', { class: 'empty panel' }, level === 'INFO' ? 'No log lines were sent.' : 'Nothing at this level in the last lines of the logs.');
+  return [filters, h('p', { class: 'quiet note' }, 'The last 40 lines of each log, as the agent sends them. Times are the server\'s own.'), body];
+}
+
 export function raw(ctx) {
-  const tabs = [['logs', 'Log tails'], ['status', 'Status files']];
+  const tabs = [['logs', 'Log tails'], ['events', 'Events'], ['status', 'Status files']];
   const list = h('div', { role: 'tablist', 'aria-label': 'Data from the server', class: 'tabs' },
     tabs.map(([id, label]) => h('button', {
       type: 'button', role: 'tab', id: `tab-${id}`, 'aria-controls': 'raw-panel', 'aria-selected': String(ctx.tab === id),
@@ -489,7 +698,7 @@ export function raw(ctx) {
     sectionHead('From the server', 'Secrets are blanked by the agent before sending', 'h-raw'),
     list,
     h('div', { role: 'tabpanel', id: 'raw-panel', 'aria-labelledby': `tab-${ctx.tab}`, class: 'tabpanel' },
-      ctx.tab === 'logs' ? logList(ctx) : statusList(ctx)));
+      ctx.tab === 'logs' ? logList(ctx) : ctx.tab === 'events' ? eventsList(ctx) : statusList(ctx)));
 }
 
 // ---------------------------------------------------------------- whole-page states

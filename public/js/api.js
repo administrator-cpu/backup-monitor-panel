@@ -25,6 +25,8 @@ export async function request(path, { method = 'GET', body } = {}) {
   }
   if (res.type === 'opaqueredirect') throw new SignedOut();
   const isJson = (res.headers.get('Content-Type') || '').includes('application/json');
+  // Nginx answers 403 without JSON when this device's gate key has run out.
+  if (res.status === 403 && !isJson) throw new SignedOut('This device needs the gate key again.');
   const data = isJson ? await res.json().catch(() => null) : null;
   if (data && data.signIn) throw new SignedOut(data.error);
   if (!res.ok || !data || data.ok !== true) {
@@ -37,3 +39,4 @@ export const getStatus = () => request('/api/status');
 export const signOut = () => request('/api/logout', { method: 'POST', body: {} });
 export const queueCommand = (action) => request('/api/commands', { method: 'POST', body: { action } });
 export const cancelCommand = (id) => request(`/api/commands/${encodeURIComponent(id)}/cancel`, { method: 'POST', body: {} });
+export const saveNote = (change) => request('/api/notes', { method: 'POST', body: change });
