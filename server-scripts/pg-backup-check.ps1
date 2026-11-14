@@ -1,6 +1,8 @@
 <#
-  pg-backup-check.ps1  v1.1   morning check of the nightly backup  (scheduled at 08:00)
+  pg-backup-check.ps1  v1.2   morning check of the nightly backup  (scheduled at 08:00)
   v1.1: also writes status\pg-snapshots.json for the backup panel (panel-status.ps1; optional, never changes the check).
+  v1.2: a check started before 04:00 (by hand, or with the panel's Run check) looks at last night's
+        snapshot: today's does not exist until the 02:00 backup has run. The e-mail says when the check ran.
 
   Does NOT trust the nightly script's own word. It looks at what is really in Google Drive:
    - today's snapshot folder exists and has manifest.txt, globals.sql and a dump for every database,
@@ -19,17 +21,26 @@ $now   = Get-Date
 $today = $now.ToString('yyyy-MM-dd')
 $problems = New-Object System.Collections.ArrayList
 
+# Which night's snapshot to look at: today's, or last night's when the check runs before 04:00.
+$snapDay = $today
+$snapName = "Today's snapshot ($today)"
+if ($now.Hour -lt 4) {
+    $snapDay = $now.AddDays(-1).ToString('yyyy-MM-dd')
+    $snapName = "Last night's snapshot ($snapDay)"
+}
+
 try {
     Log "===== backup check ($today) ====="
+    if ($snapDay -ne $today) { Log "Started before 04:00, so this checks last night's snapshot ($snapDay); today's is made at 02:00." }
 
-    # 1. what is in Drive for today?
-    $r = Invoke-Rclone @('lsf', "$($Cfg.Remote)/$today", '--files-only')
+    # 1. what is in Drive for that night?
+    $r = Invoke-Rclone @('lsf', "$($Cfg.Remote)/$snapDay", '--files-only')
     if ($r.Code -ne 0) {
-        [void]$problems.Add("Today's snapshot ($today) is not in Google Drive, or Drive cannot be reached. rclone said: $($r.Lines -join ' | ')")
+        [void]$problems.Add("$snapName is not in Google Drive, or Drive cannot be reached. rclone said: $($r.Lines -join ' | ')")
     } else {
         $files = @($r.Lines | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         foreach ($need in @('manifest.txt', 'globals.sql')) {   # names as rclone shows them after decryption
-            if ($files -notcontains $need) { [void]$problems.Add("Today's snapshot is missing $need") }
+            if ($files -notcontains $need) { [void]$problems.Add("$snapName is missing $need") }
         }
         $dumpsInDrive = @($files | Where-Object { $_ -like '*.dump' }).Count
 
@@ -38,7 +49,7 @@ try {
         if ($q.Code -eq 0) {
             $expected = [int](($q.Lines | Select-Object -First 1).Trim())
             if ($dumpsInDrive -lt $expected) {
-                [void]$problems.Add("Today's snapshot has $dumpsInDrive database dumps but Postgres has $expected databases (a database created after 02:00 would explain one missing).")
+                [void]$problems.Add("$snapName has $dumpsInDrive database dumps but Postgres has $expected databases (a database created after 02:00 would explain one missing).")
             }
         } else {
             [void]$problems.Add("Could not ask Postgres how many databases exist: $($q.Lines -join ' | ')")
@@ -63,7 +74,7 @@ try {
     if (Get-Command Save-PanelPgSummary -ErrorAction SilentlyContinue) { Save-PanelPgSummary $problems $Cfg.Remote $Cfg.StatusDir }
 
     if ($problems.Count -gt 0) {
-        $text = "Problems found by the 08:00 backup check on $env:COMPUTERNAME ($today):`r`n`r`n- " + (Limit-Text ($problems -join "`r`n- ") 1500) +
+        $text = "Problems found by the Postgres backup check (run at $($now.ToString('HH:mm'))) on $env:COMPUTERNAME ($today):`r`n`r`n- " + (Limit-Text ($problems -join "`r`n- ") 1500) +
                 "`r`n`r`nLog: $(Join-Path $Cfg.LogDir 'pg-backup.log')"
         Log ("CHECK FAILED: " + ($problems -join ' || ')) 'ERROR'
         $null = Send-Mail 'Postgres backup check: PROBLEM' $text

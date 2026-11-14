@@ -1,6 +1,8 @@
 <#
-  mongo-backup-check.ps1  v1.1   morning check of the nightly MongoDB backup  (scheduled at 08:05)
+  mongo-backup-check.ps1  v1.2   morning check of the nightly MongoDB backup  (scheduled at 08:05)
   v1.1: also writes status\mongo-snapshots.json for the backup panel (panel-status.ps1; optional, never changes the check).
+  v1.2: a check started before 04:00 (by hand, or with the panel's Run check) looks at last night's
+        snapshot: today's does not exist until the 02:30 backup has run. The e-mail says when the check ran.
 
   Looks at what is really in Google Drive (does not trust the nightly script's own word):
    - today's snapshot folder exists and has manifest.txt and mongo-all.archive,
@@ -20,12 +22,21 @@ $today = $now.ToString('yyyy-MM-dd')
 $problems = New-Object System.Collections.ArrayList
 $last = $null
 
+# Which night's snapshot to look at: today's, or last night's when the check runs before 04:00.
+$snapDay = $today
+$snapName = "Today's MongoDB snapshot ($today)"
+if ($now.Hour -lt 4) {
+    $snapDay = $now.AddDays(-1).ToString('yyyy-MM-dd')
+    $snapName = "Last night's MongoDB snapshot ($snapDay)"
+}
+
 try {
     Log "===== MongoDB backup check ($today) ====="
+    if ($snapDay -ne $today) { Log "Started before 04:00, so this checks last night's snapshot ($snapDay); today's is made at 02:30." }
 
-    $r = Invoke-Rclone @('lsf', "$($Cfg.MongoRemote)/$today", '--files-only', '--format', 'ps', '--separator', '|')
+    $r = Invoke-Rclone @('lsf', "$($Cfg.MongoRemote)/$snapDay", '--files-only', '--format', 'ps', '--separator', '|')
     if ($r.Code -ne 0) {
-        [void]$problems.Add("Today's MongoDB snapshot ($today) is not in Google Drive, or Drive cannot be reached. rclone said: $($r.Lines -join ' | ')")
+        [void]$problems.Add("$snapName is not in Google Drive, or Drive cannot be reached. rclone said: $($r.Lines -join ' | ')")
     } else {
         $sizes = @{}
         foreach ($line in $r.Lines) {
@@ -33,11 +44,11 @@ try {
             if ($p.Count -ge 2) { $sizes[$p[0].Trim()] = [double]$p[1] }
         }
         foreach ($need in @('manifest.txt', 'mongo-all.archive')) {
-            if (-not $sizes.ContainsKey($need)) { [void]$problems.Add("Today's snapshot is missing $need") }
+            if (-not $sizes.ContainsKey($need)) { [void]$problems.Add("$snapName is missing $need") }
         }
         if ($sizes.ContainsKey('mongo-all.archive')) {
             $todaySize = $sizes['mongo-all.archive']
-            $snaps = @(Get-MongoRemoteSnapshots | Where-Object { $_ -lt $today })
+            $snaps = @(Get-MongoRemoteSnapshots | Where-Object { $_ -lt $snapDay })
             if ($snaps.Count -gt 0) {
                 $prev = $snaps[-1]
                 $pr = Invoke-Rclone @('lsf', "$($Cfg.MongoRemote)/$prev", '--files-only', '--format', 'ps', '--separator', '|')
@@ -47,7 +58,7 @@ try {
                         if ($p.Count -ge 2 -and $p[0].Trim() -eq 'mongo-all.archive') {
                             $prevSize = [double]$p[1]
                             if ($prevSize -gt 1MB -and $todaySize -lt ($prevSize * $Cfg.MongoShrinkAlarm)) {
-                                [void]$problems.Add(("Today's archive is only {0} but the one from {1} was {2}. Data may have been deleted - look before trusting this backup." -f (Format-Size $todaySize), $prev, (Format-Size $prevSize)))
+                                [void]$problems.Add(("The archive from {3} is only {0} but the one from {1} was {2}. Data may have been deleted - look before trusting this backup." -f (Format-Size $todaySize), $prev, (Format-Size $prevSize), $snapDay))
                             }
                         }
                     }
@@ -72,7 +83,7 @@ try {
     if (Get-Command Save-PanelMongoSummary -ErrorAction SilentlyContinue) { Save-PanelMongoSummary $problems $Cfg.MongoRemote $Cfg.StatusDir $last }
 
     if ($problems.Count -gt 0) {
-        $text = "Problems found by the 08:05 MongoDB backup check on $env:COMPUTERNAME ($today):`r`n`r`n- " + (Limit-Text ($problems -join "`r`n- ") 1500) +
+        $text = "Problems found by the MongoDB backup check (run at $($now.ToString('HH:mm'))) on $env:COMPUTERNAME ($today):`r`n`r`n- " + (Limit-Text ($problems -join "`r`n- ") 1500) +
                 "`r`n`r`nLog: $(Join-Path $Cfg.LogDir 'mongo-backup.log')"
         Log ('CHECK FAILED: ' + ($problems -join ' || ')) 'ERROR'
         $null = Send-Mail 'MongoDB backup check: PROBLEM' $text

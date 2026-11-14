@@ -25,12 +25,19 @@ $recent = (Get-Date).AddHours(-5).ToString('o')
 # Shared fake helpers, written into each fake common file.
 $fakeShared = @'
 function Log($m, $l = 'INFO') { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'logs\test.log') -Value ('[' + $l + '] ' + $m) }
-function Send-Mail($s, $b) { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'logs\mail.log') -Value $s; return $true }
+function Send-Mail($s, $b) { Add-Content -LiteralPath (Join-Path $PSScriptRoot 'logs\mail.log') -Value $s; Add-Content -LiteralPath (Join-Path $PSScriptRoot 'logs\mail-body.log') -Value $b; return $true }
 function Limit-Text($t, $n) { return [string]$t }
 function Format-Size($b) { return ('{0} B' -f $b) }
 function Get-FreeGB($p) { return 500 }
 function New-FakeResult($code, $lines) { return [pscustomobject]@{ Code = $code; Lines = @($lines) } }
 $FailListing = Test-Path (Join-Path $PSScriptRoot 'fail-listing.flag')
+# today's Drive folder does not exist yet (the night's backup has not run)
+$NoToday = Test-Path (Join-Path $PSScriptRoot 'no-today.flag')
+# A fixed clock ("yyyy-MM-dd HH:mm" in clock.txt) for the check's own "now".
+if (Test-Path (Join-Path $PSScriptRoot 'clock.txt')) {
+    $script:FakeNow = [datetime]::ParseExact((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'clock.txt') -Raw).Trim(), 'yyyy-MM-dd HH:mm', $null)
+    function Get-Date { if ($args.Count -gt 0) { return (Microsoft.PowerShell.Utility\Get-Date @args) }; return $script:FakeNow }
+}
 '@
 
 $pgCommon = $fakeShared + @"
@@ -47,6 +54,7 @@ function Invoke-Rclone(`$a) {
         if (`$FailListing) { return (New-FakeResult 1 @('ERROR : listing failed')) }
         return (New-FakeResult 0 @('NOTICE: some rclone notice', '$day2/manifest.txt|10', '$day2/app.dump|1000', '$day1/manifest.txt|10', '$day1/app.dump|1100', '$day1/crm.dump|50', '$today/manifest.txt|10', '$today/globals.sql|5', '$today/app.dump|1200', '$today/crm.dump|60'))
     }
+    if (`$a[0] -eq 'lsf' -and `$NoToday -and `$a[1] -like '*/$today') { return (New-FakeResult 3 @('ERROR : : error listing: directory not found', 'NOTICE: Failed to lsf with 2 errors: last error was: error in ListJSON: directory not found')) }
     if (`$a[0] -eq 'lsf') { return (New-FakeResult 0 @('manifest.txt', 'globals.sql', 'app.dump', 'crm.dump')) }
     if (`$a[0] -eq 'about') { return (New-FakeResult 0 @('{', '  "total": 2199023255552,', '  "used": 107374182400,', '  "trashed": 0,', '  "other": 1073741824,', '  "free": 2090575331328', '}')) }
     if (`$a[0] -eq 'size') { return (New-FakeResult 0 @('{"count":9,"bytes":3445}')) }
@@ -61,6 +69,7 @@ function Get-MongoRemoteSnapshots { return @('$day1', '$today') }
 function Invoke-Rclone(`$a) {
     `$a = @(`$a)
     if (`$a[0] -eq 'lsf' -and `$a -contains '-R') { return (New-FakeResult 0 @('$day1/manifest.txt|10', '$day1/mongo-all.archive|5000000', '$today/manifest.txt|10', '$today/mongo-all.archive|5100000')) }
+    if (`$a[0] -eq 'lsf' -and `$NoToday -and `$a[1] -like '*/$today') { return (New-FakeResult 3 @('ERROR : : error listing: directory not found')) }
     if (`$a[0] -eq 'lsf') { return (New-FakeResult 0 @('manifest.txt|10', 'mongo-all.archive|5100000')) }
     if (`$a[0] -eq 'size') { return (New-FakeResult 0 @('{"count":4,"bytes":10100020}')) }
     return (New-FakeResult 1 @('unexpected'))
@@ -94,7 +103,7 @@ function Set-Fixture([string]$Common, [string]$CommonName, [string]$CheckName, [
     Get-ChildItem -LiteralPath (Join-Path $tmp 'status') | Remove-Item -Force
     Get-ChildItem -LiteralPath (Join-Path $tmp 'logs') | Remove-Item -Force
     Get-ChildItem -LiteralPath $tmp -Filter '*.ps1' | Remove-Item -Force
-    Remove-Item -LiteralPath (Join-Path $tmp 'fail-listing.flag') -ErrorAction SilentlyContinue
+    foreach ($flag in @('fail-listing.flag', 'no-today.flag', 'clock.txt', 'slow-b2.flag')) { Remove-Item -LiteralPath (Join-Path $tmp $flag) -ErrorAction SilentlyContinue }
     [System.IO.File]::WriteAllText((Join-Path $tmp $CommonName), $Common)
     Copy-Item -LiteralPath (Join-Path $src $CheckName) -Destination $tmp
     if ($WithHelper) { Copy-Item -LiteralPath (Join-Path $src 'panel-status.ps1') -Destination $tmp }
@@ -161,6 +170,21 @@ try {
     Assert ($code -eq 1 -and (& $mails).Count -eq 1) 'a problem is still e-mailed and exits 1'
     Assert ($st.check.ok -eq $false -and @($st.check.problems)[0] -match 'No successful run') 'the panel file carries the problem'
 
+    Write-Host 'pg-backup-check.ps1 started after midnight, before the 02:00 backup'
+    $mailBody = { $p = Join-Path $tmp 'logs\mail-body.log'; if (Test-Path $p) { Get-Content $p -Raw } else { '' } }
+    $testLog = { Get-Content -LiteralPath (Join-Path $tmp 'logs\test.log') -Raw }
+    Set-Fixture $pgCommon 'pg-backup-common.ps1' 'pg-backup-check.ps1'
+    [System.IO.File]::WriteAllText((Join-Path $tmp 'status\last-success.json'), ('{"time":"' + $recent + '"}'))
+    New-Item -ItemType File -Path (Join-Path $tmp 'no-today.flag') | Out-Null
+    Set-Content -LiteralPath (Join-Path $tmp 'clock.txt') -Value "$today 00:18"
+    $code = Invoke-Check 'pg-backup-check.ps1'
+    Assert ($code -eq 0 -and (& $mails).Count -eq 0) 'at 00:18 it checks last night''s snapshot: no false e-mail (the 14 Nov case)'
+    Assert ((& $testLog) -match [regex]::Escape("checks last night's snapshot ($day1)")) 'the log says which night was checked'
+    Set-Content -LiteralPath (Join-Path $tmp 'clock.txt') -Value "$today 08:00"
+    $code = Invoke-Check 'pg-backup-check.ps1'
+    Assert ($code -eq 1 -and (& $mails).Count -eq 1) 'at 08:00 a missing folder for today is still a real problem'
+    Assert ((& $mailBody) -match [regex]::Escape("Today's snapshot ($today) is not in Google Drive") -and (& $mailBody) -match 'run at 08:00') 'the e-mail names the night and the time the check ran'
+
     # ------------------------------------------------------------------
     Write-Host 'mongo-backup-check.ps1'
     Set-Fixture $mongoCommon 'mongo-backup-common.ps1' 'mongo-backup-check.ps1'
@@ -170,6 +194,16 @@ try {
     Assert ($code -eq 0 -and (& $mails).Count -eq 0) 'the check still passes and sends no e-mail'
     Assert ($st.kind -eq 'mongo' -and $st.sets[0].count -eq 2 -and $st.sets[0].points[0].bytes -eq 5100010) 'two nights listed with their size'
     Assert ((@($st.coverage.databases) -join ',') -eq 'shop_production,reports_db') 'the databases in the archive are listed'
+
+    Write-Host 'mongo-backup-check.ps1 started after midnight, before the 02:30 backup'
+    New-Item -ItemType File -Path (Join-Path $tmp 'no-today.flag') | Out-Null
+    Set-Content -LiteralPath (Join-Path $tmp 'clock.txt') -Value "$today 00:18"
+    $code = Invoke-Check 'mongo-backup-check.ps1'
+    Assert ($code -eq 0 -and (& $mails).Count -eq 0) 'at 00:18 it checks last night''s snapshot: no false e-mail'
+    Assert ((& $testLog) -match [regex]::Escape("checks last night's snapshot ($day1)")) 'the log says which night was checked'
+    Set-Content -LiteralPath (Join-Path $tmp 'clock.txt') -Value "$today 08:05"
+    $code = Invoke-Check 'mongo-backup-check.ps1'
+    Assert ($code -eq 1 -and (& $mailBody) -match [regex]::Escape("Today's MongoDB snapshot ($today) is not in Google Drive") -and (& $mailBody) -match 'run at 08:05') 'at 08:05 a missing folder for today is still e-mailed'
 
     # ------------------------------------------------------------------
     Write-Host 'files-backup-check.ps1'
