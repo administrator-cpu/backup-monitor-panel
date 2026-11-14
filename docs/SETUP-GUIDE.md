@@ -482,21 +482,32 @@ only written to the log as a warning.
 To undo: `Copy-Item before-panel\*.ps1 .\ -Force`. The helper and the `*-snapshots.json`
 files then simply stop being updated.
 
-**Update to files-backup-check v1.2 (once, if you did Part 11 before 14 Nov 2026).** It fixes the
-false "check failed: Invalid JSON primitive: Load" e-mail you got on 12 Nov. When Backblaze is
-slow, restic prints "retrying" lines next to its list, and v1.1 tried to read those as part of
-the list. v1.2 reads only the list, logs the retries as a warning, and tells the panel how long
-the listing took.
+**Update the three checks to v1.2 (once, if you did Part 11 before 15 Nov 2026).** It fixes two
+false alarms:
+- **Files check:** "check failed: Invalid JSON primitive: Load" (12 Nov). When Backblaze is slow,
+  restic prints "retrying" lines next to its list, and v1.1 read those as part of the list.
+  v1.2 reads only the list, logs the retries as a warning, and tells the panel how long the
+  listing took.
+- **Postgres and MongoDB checks:** "Today's snapshot is not in Google Drive ... directory not
+  found" when a check runs between midnight and the night's backup (14 Nov, 00:18). Before
+  04:00, v1.2 checks last night's snapshot. The e-mail now says when the check ran.
+
 ```
 cd C:\Apps\db-backup
-Get-FileHash files-backup-check.ps1 | Select-Object Hash
+Get-FileHash pg-backup-check.ps1, mongo-backup-check.ps1, files-backup-check.ps1 | Select-Object @{n='File';e={Split-Path $_.Path -Leaf}}, Hash
 ```
-It must show `67056CF68BC6EA7C5AB9CBC94D16F0183C8AE878BF1B4D6674A3820621F45E6E` (that is v1.1).
-If it does, after `git pull`:
+They must show exactly (that is v1.1):
 ```
-Copy-Item panel\server-scripts\files-backup-check.ps1, panel\server-scripts\panel-status.ps1 .\ -Force
+pg-backup-check.ps1     DBD9C9C1BB7DA1B7369F452A8E9AED90A08DD1B36BB58E0A36037694C8450EBF
+mongo-backup-check.ps1  3ABC1D0B01E5F01B8A1B9ED077DC176D80DA41C64443DB7BDA396BA231650110
+files-backup-check.ps1  67056CF68BC6EA7C5AB9CBC94D16F0183C8AE878BF1B4D6674A3820621F45E6E
 ```
-The Postgres and MongoDB checks stay as they are.
+A file that shows a different hash was changed since; leave that one and tell me. For the
+matching ones, after `git pull`:
+```
+Copy-Item panel\server-scripts\pg-backup-check.ps1, panel\server-scripts\mongo-backup-check.ps1, panel\server-scripts\files-backup-check.ps1, panel\server-scripts\panel-status.ps1 .\ -Force
+```
+Your originals stay in `before-panel\` from step 3.
 
 ## Part 12: Gate page in front of the sign-in
 
@@ -647,6 +658,7 @@ exact report.
 | `nginx-rotate.log`: "nginx -s reopen failed" | Nginx keeps writing into the renamed file, so nothing is lost. Run `.\nginx.exe -s reopen` in `C:\nginx-1.30.2` by hand. If it says it can't find the process, Nginx was started some other way; tell me what `Get-Process nginx` shows. |
 | `nginx-rotate.log`: "... changed while packing, so it was left unpacked" | Nginx was still writing to it. The next run packs it. |
 | Files check e-mail: "check failed: Invalid JSON primitive: Load" | Backblaze was slow and files-backup-check v1.1 misread restic's retry messages. Install v1.2 (Part 11, last step). |
+| Postgres or MongoDB check e-mail: "Today's snapshot ... directory not found", with a time after midnight in the rclone line | The check ran before that night's backup existed (a v1.1 check started by hand after midnight). The backups are fine. Install v1.2 (Part 11, last step). |
 | `nginx-reload.log`: "nginx -t failed, so Nginx was NOT reloaded" | `nginx.conf` has a mistake (the sites keep running on the old settings). Run `.\nginx.exe -t` in `C:\nginx-1.30.2` to see it, fix it, then run the reload script by hand. |
 
 Logs: the panel's are in `pm2 logs backup-panel` (start-up, sign-ins, failed sign-ins,
