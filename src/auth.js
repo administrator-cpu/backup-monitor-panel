@@ -139,6 +139,15 @@ export function createAuth({ loginFile, log = console.log }) {
   return {
     isSetUp: () => loginData() !== null,
 
+    // When setup-login last wrote the password and authenticator key (for the reminders).
+    loginSetAt() {
+      try {
+        return existsSync(loginFile) ? statSync(loginFile).mtime.toISOString() : null;
+      } catch {
+        return null;
+      }
+    },
+
     // { ok, token } | { ok: false, status, error, retryMinutes? }
     login(password, code, ip, now) {
       const data = loginData();

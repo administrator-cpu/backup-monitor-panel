@@ -8,6 +8,7 @@ import { ACTIONS, findAction, MAX_COMMANDS_PER_HOUR } from './actions.js';
 import { readCookie, sessionCookie, sessionCookieName } from './auth.js';
 import { fail, htmlMessage, json, readJson, redirect, withSecurityHeaders } from './http.js';
 import { iso } from './store.js';
+import { applyNoteChange, validateNoteChange } from '../public/js/reminders.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MAX_REPORT_BYTES = 1024 * 1024;
@@ -36,6 +37,16 @@ export function validateReport(r) {
   return null;
 }
 
+const SUMMARY_FILES = ['pg-snapshots.json', 'mongo-snapshots.json', 'files-snapshots.json'];
+
+function summaryContents(r) {
+  return SUMMARY_FILES.map((name) => {
+    const f = r.statusFiles.find((s) => s && s.name === name);
+    return f && f.content && typeof f.content === 'object' ? f.content : null;
+  });
+}
+
+// One small row per day, for the trend lines.
 export function metricsFromReport(r) {
   const disks = r.disks.slice(0, 26).map((d) => ({ name: str(d && d.name, 8), sizeBytes: num(d && d.sizeBytes), freeBytes: num(d && d.freeBytes) }));
   const b = r.backblaze;
@@ -43,10 +54,48 @@ export function metricsFromReport(r) {
     ? {
       totalBytes: num(b.totalBytes),
       checkedAt: str(b.checkedAt, 40),
+      listMs: num(b.listMs),
       prefixes: (Array.isArray(b.prefixes) ? b.prefixes : []).slice(0, 10).map((p) => ({ prefix: str(p && p.prefix, 100), bytes: num(p && p.bytes) })),
     }
     : null;
-  return { disks, b2 };
+  // How long each morning check took to list its backups, and the Drive totals.
+  const reads = {};
+  let driveBytes = null;
+  let account = null;
+  for (const s of summaryContents(r)) {
+    if (!s) continue;
+    for (const set of Array.isArray(s.sets) ? s.sets.slice(0, 4) : []) {
+      if (!set || typeof set.id !== 'string' || !/^[a-z]{2,8}$/.test(set.id) || set.fromEarlierCheck) continue;
+      reads[set.id] = { ms: num(set.listMs), stored: num(set.storedBytes) };
+      if (set.provider === 'Google Drive' && num(set.storedBytes) !== null) driveBytes = (driveBytes || 0) + num(set.storedBytes);
+    }
+    if (s.kind === 'pg' && s.drive && num(s.drive.totalBytes)) {
+      account = { totalBytes: num(s.drive.totalBytes), usedBytes: (num(s.drive.usedBytes) || 0) + (num(s.drive.otherBytes) || 0) };
+    }
+  }
+  const drive = driveBytes === null && !account ? null : { backupBytes: driveBytes, account };
+  return { disks, b2, reads, drive };
+}
+
+const JOB_IDS = ['pg', 'mongo', 'files'];
+const UTC_SECOND = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/;
+const RUNNING = 267009;
+const NEVER_RAN = 267011;
+
+// The last finished run of each of the six tasks, as the report shows it.
+export function runsFromReport(r) {
+  const out = [];
+  for (const job of r.jobs.slice(0, 10)) {
+    if (!job || !JOB_IDS.includes(job.id)) continue;
+    for (const kind of ['backup', 'check']) {
+      const t = job[kind] && job[kind].task;
+      if (!t || t.found !== true || t.state === 'Running') continue;
+      const result = num(t.lastResult);
+      if (typeof t.lastRunAt !== 'string' || !UTC_SECOND.test(t.lastRunAt) || result === null || result === RUNNING || result === NEVER_RAN) continue;
+      out.push({ job: job.id, kind, runAt: t.lastRunAt, result });
+    }
+  }
+  return out;
 }
 
 function agentEvents(r) {
@@ -92,6 +141,7 @@ export function createApp({ config, store, auth, agentCheck, assets, log = conso
     if (problem) return fail(400, problem);
     const nowIso = iso(now);
     store.saveReport({ nowIso, payload: JSON.stringify(value), day: nowIso.slice(0, 10), metrics: metricsFromReport(value), events: agentEvents(value) });
+    store.recordRuns(runsFromReport(value), nowIso);
     store.expireCommands(now);
     const commands = [];
     if (config.commandsEnabled && value.agent.commandsEnabled === true) {
@@ -135,7 +185,25 @@ export function createApp({ config, store, auth, agentCheck, assets, log = conso
       events: store.listEvents('agent-error', 20),
       signIns: store.listEvents('sign-in', 5),
       failedSignIns24h: auth.failuresSince(now - 86400000),
+      runs: store.listRuns(iso(now - 35 * 86400000)),
+      historySince: store.firstRunSeenAt(),
+      notes: store.getNotes(),
+      loginSetAt: auth.loginSetAt ? auth.loginSetAt() : null,
     });
+  }
+
+  // The owner's reminders: one validated change at a time. Starts nothing.
+  async function saveNote(request, now, peer) {
+    const { value, error } = await readJson(request, 2048);
+    if (error) return error;
+    const today = iso(now + 86400000).slice(0, 10); // a day of slack for time zones
+    const checked = validateNoteChange(value, today);
+    if (checked.error) return fail(400, checked.error);
+    const notes = applyNoteChange(store.getNotes(), checked.change);
+    store.setNotes(notes);
+    const c = checked.change;
+    store.addEvent({ at: iso(now), kind: 'note', message: `${c.section}${c.id ? ` ${c.id}` : ''} changed from ${str(peer.ip, 64)}` });
+    return json({ ok: true, notes });
   }
 
   async function createCommand(request, now, peer) {
@@ -229,6 +297,7 @@ export function createApp({ config, store, auth, agentCheck, assets, log = conso
         const refused = checkSameOrigin(request, url);
         if (refused) return refused;
         if (path === '/api/commands') return createCommand(request, now, peer);
+        if (path === '/api/notes') return saveNote(request, now, peer);
         const m = /^\/api\/commands\/([^/]+)\/cancel$/.exec(path);
         if (m && UUID_RE.test(m[1])) {
           if (!store.cancelCommand(m[1], `${VIEWER} from ${str(peer.ip, 64)}`, iso(now))) return fail(409, 'Only a command that is still waiting can be cancelled.');

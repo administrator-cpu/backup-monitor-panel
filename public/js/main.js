@@ -1,6 +1,6 @@
 // Page controller: polling, rendering, the Run-now dialog and notices.
 
-import { cancelCommand, getStatus, queueCommand, signOut, SignedOut } from './api.js';
+import { cancelCommand, getStatus, queueCommand, saveNote, signOut, SignedOut } from './api.js';
 import { h } from './dom.js';
 import { ago, makeFormatter, viewerTimeZone, zoneLabel, zoneOffsetMinutes } from './format.js';
 import { commandsMode, isStale } from './health.js';
@@ -44,6 +44,7 @@ const ui = {
   pointsFrom: '',
   pointsTo: '',
   pointsAll: false,
+  logLevel: 'WARN',
   tab: 'logs',
   busy: null,
   error: null,
@@ -112,6 +113,13 @@ function context() {
       render();
       if (focus) app.querySelector(`[data-focus="${CSS.escape(focus)}"]`)?.focus();
     },
+    logLevel: ui.logLevel,
+    onLogLevel: (level) => {
+      ui.logLevel = level;
+      render();
+      app.querySelector(`[data-focus="level:${level}"]`)?.focus();
+    },
+    onNote: saveReminder,
     onRun: runAction,
     onCancel: cancel,
     onTab: (tab, focus) => {
@@ -141,7 +149,8 @@ function render() {
   if (ui.error) parts.push(view.refreshError(ui.error, ui.state.report?.receivedAt, Math.round(ui.retryMs / 1000), () => load(), ctx));
   parts.push(view.summary(ctx));
   if (ui.state.report?.data) {
-    parts.push(view.backups(ctx), view.restorePoints(ctx), view.storage(ctx), view.history(ctx), view.agent(ctx), view.signIns(ctx), view.raw(ctx));
+    parts.push(view.backups(ctx), view.runHistory(ctx), view.restorePoints(ctx), view.storage(ctx), view.reminders(ctx),
+      view.history(ctx), view.agent(ctx), view.signIns(ctx), view.raw(ctx));
   } else {
     parts.push(view.history(ctx), view.signIns(ctx));
   }
@@ -338,6 +347,20 @@ async function runAction(action) {
   }
   ui.busy = null;
   await load();
+}
+
+// Reminders: save one change, then show the panel's answer.
+async function saveReminder(change, focusKey) {
+  try {
+    const res = await saveNote(change);
+    if (ui.state) ui.state = { ...ui.state, notes: res.notes };
+    notify('ok', 'Saved.');
+  } catch (e) {
+    if (e instanceof SignedOut) ui.signedOut = { reason: e.message };
+    else notify('bad', `Not saved: ${e.message}`);
+  }
+  await load();
+  if (focusKey) app.querySelector(`[data-focus="${CSS.escape(focusKey)}"]`)?.focus();
 }
 
 async function cancel(command) {

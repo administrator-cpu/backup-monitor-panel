@@ -1,6 +1,10 @@
 <#
-  files-backup-check.ps1  v1.1   morning check of the file backups  (scheduled at 08:15)
+  files-backup-check.ps1  v1.2   morning check of the file backups  (scheduled at 08:15)
   v1.1: also writes status\files-snapshots.json for the backup panel (panel-status.ps1; optional, never changes the check).
+  v1.2: reads only the JSON line of "restic snapshots". When Backblaze is slow, restic also prints
+        "Load(...) returned error, retrying" lines; mixed into the JSON they made the check fail with
+        "Invalid JSON primitive: Load" (seen on 2026-11-12). Retries are now logged as a warning, and
+        the time the listing took goes to the panel.
 
   Asks Backblaze itself (not the nightly script) whether every set has a fresh snapshot, and also warns when
    - the last successful run on this server is too old,
@@ -29,9 +33,16 @@ try {
     foreach ($name in @($Cfg.FileSets.Keys)) {
         try {
             Initialize-ResticEnv $name
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $r = Invoke-Restic @('snapshots', '--json', '--tag', $name, '--host', $Cfg.ResticHost)
+            $readMs = $sw.ElapsedMilliseconds
             if ($r.Code -ne 0) { [void]$problems.Add("[$name] cannot read the repository in Backblaze: $(Limit-Text ($r.Lines -join ' | ') 300)"); continue }
-            $raw = $r.Lines -join "`n"
+            # The list is one JSON line; anything else (such as retry messages) is not part of it.
+            $jsonLines = @($r.Lines | Where-Object { "$_" -match '^\s*[\[{]' })
+            $retries = @($r.Lines | Where-Object { "$_" -match 'retrying' }).Count
+            if ($retries -gt 0) { Log ("[$name] Backblaze was slow: restic retried $retries time(s); the listing took {0:N0} s." -f ($readMs / 1000)) 'WARN' }
+            if ($jsonLines.Count -eq 0) { [void]$problems.Add("[$name] restic gave no snapshot list: $(Limit-Text ($r.Lines -join ' | ') 300)"); continue }
+            $raw = $jsonLines -join "`n"
             $items = @($raw | ConvertFrom-Json)
             $snaps = @()
             foreach ($i in $items) { if ($i.PSObject.Properties.Name -contains 'snapshots') { $snaps += @($i.snapshots) } else { $snaps += $i } }
@@ -50,7 +61,7 @@ try {
             }
             $totalBytes += $size
             [void]$lines.Add(("  {0,-6} {1} snapshots, newest {2} h ago, stored in Backblaze: {3}" -f $name, $snaps.Count, $ageH, (Format-Size $size)))
-            $panelSets[$name] = @{ Snaps = $snaps; Stored = $size }
+            $panelSets[$name] = @{ Snaps = $snaps; Stored = $size; Ms = $readMs; Retries = $retries }
         } catch {
             [void]$problems.Add("[$name] check failed: $($_.Exception.Message)")
         } finally {

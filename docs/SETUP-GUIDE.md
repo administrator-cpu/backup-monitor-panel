@@ -43,6 +43,7 @@ The panel uses these places on the server:
 | `C:\Apps\db-backup\status\*-snapshots.json` | the restore-point lists those checks write |
 | `C:\nginx-1.30.2\conf\backup-panel-gate.conf` | the gate key Nginx checks (Part 12) |
 | `C:\Apps\db-backup\logs\nginx-reload.log` | what the certificate reload task did (Part 13) |
+| `C:\Apps\db-backup\logs\nginx-rotate.log` | what the Nginx log rotation did (Part 14) |
 
 The `secrets` folder is already left out of the file backups.
 
@@ -481,6 +482,22 @@ only written to the log as a warning.
 To undo: `Copy-Item before-panel\*.ps1 .\ -Force`. The helper and the `*-snapshots.json`
 files then simply stop being updated.
 
+**Update to files-backup-check v1.2 (once, if you did Part 11 before 14 Nov 2026).** It fixes the
+false "check failed: Invalid JSON primitive: Load" e-mail you got on 12 Nov. When Backblaze is
+slow, restic prints "retrying" lines next to its list, and v1.1 tried to read those as part of
+the list. v1.2 reads only the list, logs the retries as a warning, and tells the panel how long
+the listing took.
+```
+cd C:\Apps\db-backup
+Get-FileHash files-backup-check.ps1 | Select-Object Hash
+```
+It must show `67056CF68BC6EA7C5AB9CBC94D16F0183C8AE878BF1B4D6674A3820621F45E6E` (that is v1.1).
+If it does, after `git pull`:
+```
+Copy-Item panel\server-scripts\files-backup-check.ps1, panel\server-scripts\panel-status.ps1 .\ -Force
+```
+The Postgres and MongoDB checks stay as they are.
+
 ## Part 12: Gate page in front of the sign-in
 
 Why: without it, anyone on the internet can reach the sign-in page and try passwords.
@@ -543,6 +560,33 @@ connection. If the test fails, it reloads nothing and writes an ERROR line, so a
    ```
    The panel also shows `nginx-reload.log` under **From the server > Log tails**.
 
+## Part 14: Rotate the Nginx logs (all sites)
+
+Why: Nginx on Windows never starts a new log file by itself; `access.log` had grown to about
+10.6 GB. Once a week (Mondays 05:30) this task:
+1. renames each log in `C:\nginx-1.30.2\logs` that is over 50 MB (for example
+   `access.log` to `access-20261116-0530.log`);
+2. runs `nginx -s reopen`, so Nginx starts fresh files. That is not a restart: no site goes down;
+3. packs each renamed file into a `.gz`, usually 10 to 20 times smaller. It reads the `.gz` back
+   to check it holds every byte, and **only then removes the unpacked renamed copy**. If anything
+   doesn't match, it keeps both.
+
+It never deletes `.gz` files. They stay in the logs folder until you delete them yourself.
+
+1. Run it once by hand (server, PowerShell as Administrator). The first time it packs the big
+   `access.log`, which takes a few minutes:
+   ```
+   powershell -ExecutionPolicy Bypass -File C:\Apps\db-backup\panel\deploy\rotate-nginx-logs.ps1
+   ```
+   You should see `Renamed access.log (10.6 GB) to ...`, `Nginx reopened its logs` and
+   `Packed ...gz: 10.6 GB -> ...`. Logs under 50 MB are left alone.
+2. Create the weekly task:
+   ```
+   powershell -ExecutionPolicy Bypass -File C:\Apps\db-backup\panel\deploy\rotate-nginx-logs.ps1 -Install
+   ```
+3. Any time later, `-Status` shows the task, the biggest files in the logs folder and the
+   end of `nginx-rotate.log`. The panel shows that log too.
+
 ## Updating later
 
 ```
@@ -600,6 +644,9 @@ exact report.
 | `-SetHeartbeatUrl`: "Not saved: the service answered HTTP 404" | The Ping URL was copied incompletely. Copy it again from the check's page. |
 | Panel: "Outside alert: Last ping failed" | The server can't reach healthchecks.io (internet or firewall). If it lasts more than 15 minutes, healthchecks.io e-mails you that the server is quiet. |
 | Panel: "Restore points" says nothing from a check yet | Part 11 isn't done, or that check hasn't run since. Look for `Panel summary:` warnings in that backup's log. |
+| `nginx-rotate.log`: "nginx -s reopen failed" | Nginx keeps writing into the renamed file, so nothing is lost. Run `.\nginx.exe -s reopen` in `C:\nginx-1.30.2` by hand. If it says it can't find the process, Nginx was started some other way; tell me what `Get-Process nginx` shows. |
+| `nginx-rotate.log`: "... changed while packing, so it was left unpacked" | Nginx was still writing to it. The next run packs it. |
+| Files check e-mail: "check failed: Invalid JSON primitive: Load" | Backblaze was slow and files-backup-check v1.1 misread restic's retry messages. Install v1.2 (Part 11, last step). |
 | `nginx-reload.log`: "nginx -t failed, so Nginx was NOT reloaded" | `nginx.conf` has a mistake (the sites keep running on the old settings). Run `.\nginx.exe -t` in `C:\nginx-1.30.2` to see it, fix it, then run the reload script by hand. |
 
 Logs: the panel's are in `pm2 logs backup-panel` (start-up, sign-ins, failed sign-ins,

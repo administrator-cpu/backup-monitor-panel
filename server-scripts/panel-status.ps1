@@ -115,11 +115,19 @@ function Get-PanelDriveSpace([string]$Remote) {
 }
 
 function Get-PanelDriveSet([string]$Id, [string]$Remote, [ref]$NewestNames) {
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $r = Invoke-Rclone @('lsf', '-R', '--files-only', '--fast-list', '--format', 'ps', '--separator', '|', $Remote)
-    if ($r.Code -ne 0) { throw ('rclone could not list {0}' -f $Remote) }
+    $ms = $sw.ElapsedMilliseconds
+    if ($r.Code -ne 0) {
+        $detail = @(@($r.Lines) | Where-Object { "$_" -match '(?i)error|fail|denied|token|timeout|unauthori' } | Select-Object -Last 2) -join ' | '
+        if ($detail.Length -gt 300) { $detail = $detail.Substring(0, 300) }
+        throw ('rclone could not list {0}: {1}' -f $Remote, $detail)
+    }
     $groups = ConvertFrom-PanelDriveListing $r.Lines
     $NewestNames.Value = Get-PanelNewestNames $groups
-    return (New-PanelDriveSet $Id $Remote $groups)
+    $set = New-PanelDriveSet $Id $Remote $groups
+    $set['listMs'] = [int64]$ms
+    return $set
 }
 
 # Which databases exist, and which have a dump in the newest folder.
@@ -144,7 +152,7 @@ function Get-PanelDbCoverage($Databases, $NewestNames, [string]$Suffix) {
 # ---------------------------------------------------------------------------
 # restic (server logs and files in Backblaze B2)
 # ---------------------------------------------------------------------------
-function New-PanelResticSet([string]$Name, $Snapshots, [double]$StoredBytes) {
+function New-PanelResticSet([string]$Name, $Snapshots, [double]$StoredBytes, $ListMs = $null, $Retries = $null) {
     $list = @(@($Snapshots) | Where-Object { $null -ne $_ } | Sort-Object { [string](ConvertTo-PanelUtc $_.time) } -Descending)
     $points = New-Object System.Collections.ArrayList
     foreach ($s in $list) {
@@ -176,6 +184,8 @@ function New-PanelResticSet([string]$Name, $Snapshots, [double]$StoredBytes) {
         oldest      = $oldest
         newest      = $newest
         storedBytes = $StoredBytes
+        listMs      = $ListMs
+        retries     = $Retries
         points      = @($points)
         paths       = @($paths)
     }
@@ -269,7 +279,7 @@ function Save-PanelFilesSummary($Problems, $Sets, [string]$StatusDir) {
         $s = New-PanelSummary 'files' $Problems
         $list = New-Object System.Collections.ArrayList
         foreach ($name in @($Sets.Keys | Sort-Object)) {
-            try { [void]$list.Add((New-PanelResticSet $name $Sets[$name].Snaps ([double]$Sets[$name].Stored))) }
+            try { [void]$list.Add((New-PanelResticSet $name $Sets[$name].Snaps ([double]$Sets[$name].Stored) $Sets[$name].Ms $Sets[$name].Retries)) }
             catch { $s.notes = @($s.notes) + @("[$name] " + $_.Exception.Message) }
         }
         if ($list.Count -gt 0) { $s.sets = @($list) }

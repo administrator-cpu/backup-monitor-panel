@@ -52,7 +52,7 @@ $JobDefs = @(
 )
 
 # Other logs shown on the panel (not tied to one backup card).
-$ExtraLogs = @('nginx-reload.log')
+$ExtraLogs = @('nginx-reload.log', 'nginx-rotate.log')
 
 # Hooks so the tests can replace the real scheduled-task calls and the heartbeat.
 $GetTaskHook     = { param([string]$Name) @(Get-ScheduledTask -TaskName $Name -ErrorAction Stop) }
@@ -557,8 +557,10 @@ function Get-BackblazeSummary {
     if ($due -and -not $DryRun) {
         $nowIso = ConvertTo-IsoTime $now
         try {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
             $r = Invoke-BackblazeListing $b
-            $cache = [ordered]@{ checkedAt = $nowIso; lastAttemptAt = $null; lastError = $null; bucket = $r.bucket; prefixes = $r.prefixes; totalBytes = $r.totalBytes }
+            $listMs = [int64]$sw.ElapsedMilliseconds
+            $cache = [ordered]@{ checkedAt = $nowIso; lastAttemptAt = $null; lastError = $null; bucket = $r.bucket; prefixes = $r.prefixes; totalBytes = $r.totalBytes; listMs = $listMs }
             Write-AgentLog ('Backblaze size check ok: {0:N1} GB' -f ($r.totalBytes / 1e9))
         } catch {
             $msg = Protect-Text $_.Exception.Message 300
@@ -684,6 +686,13 @@ function New-AgentReport {
     $enabledActions = @()
     if ($Cfg.CommandsEnabled) { foreach ($a in $AllowedActionIds) { if (@($Cfg.DisabledActions) -cnotcontains $a) { $enabledActions += $a } } }
 
+    # When the agent token was last made (for the panel's key reminders). Only the date.
+    $tokenSetAt = $null
+    try {
+        $tp = Resolve-AgentPath $Cfg.TokenFile
+        if (Test-Path -LiteralPath $tp) { $tokenSetAt = ConvertTo-IsoTime (Get-Item -LiteralPath $tp).LastWriteTime }
+    } catch { }
+
     return [ordered]@{
         schema           = 1
         agentVersion     = $AgentVersion
@@ -697,6 +706,7 @@ function New-AgentReport {
             recentErrors    = @($recent)
             collectErrors   = @($CollectErrors)
             heartbeat       = $heartbeat
+            tokenSetAt      = $tokenSetAt
         }
         diskWarnFreeGB   = [double]$Cfg.DiskWarnFreeGB
         jobs             = @($jobs)
